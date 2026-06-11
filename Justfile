@@ -1,6 +1,7 @@
-export image_name := env("IMAGE_NAME", "image-template") # output image name, usually same as repo name, change as needed
+export image_name := env("IMAGE_NAME", "bluefin-ai-workstation") # output image name, usually same as repo name, change as needed
 export default_tag := env("DEFAULT_TAG", "latest")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
+export enable_docker := env("BLUEFIN_AGENT_ENABLE_DOCKER", "false")
 
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
@@ -93,6 +94,7 @@ build $target_image=image_name $tag=default_tag:
     if [[ -z "$(git status -s)" ]]; then
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
     fi
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_ENABLE_DOCKER={{ enable_docker }}")
 
     podman build \
         "${BUILD_ARGS[@]}" \

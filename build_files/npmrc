@@ -1,0 +1,9 @@
+audit=true
+fund=false
+ignore-scripts=true
+provenance=true
+registry=https://registry.npmjs.org/
+save-exact=true
+strict-allow-scripts=true
+strict-ssl=true
+update-notifier=false
