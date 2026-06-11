@@ -35,7 +35,7 @@ periodically compare it with upstream.
 ## What Changes From Stock Bluefin
 
 - Adds a local DX layer for VS Code, virtualization, Cockpit, Incus/LXC,
-  Podman helpers, and performance diagnostics.
+  Podman helpers, Vulkan diagnostics, and performance diagnostics.
 - Adds a small additional host package set: `clinfo`, `git-lfs`, `jq`,
   `openssl`, `ripgrep`, and `tmux`.
 - Adds `/etc/npmrc` supply-chain defaults:
@@ -46,10 +46,21 @@ periodically compare it with upstream.
   - `audit=true`
 - Adds `ujust` recipes for AI workstation setup:
   - `ujust ai-doctor`
+  - `ujust ai-gpu-doctor`
+  - `ujust agent-container-create`
+  - `ujust agent-container-enter`
+  - `ujust agent-container-bootstrap-node`
+  - `ujust agent-container-openclaw-install`
+  - `ujust agent-container-openclaw-onboard`
+  - `ujust agent-container-npm-install-trusted`
   - `ujust ai-node-bootstrap`
   - `ujust openclaw-install`
+  - `ujust openclaw-gateway-enable`
   - `ujust openclaw-onboard-local`
+  - `ujust hermes-workspace-create`
+  - `ujust ramalama-bootstrap`
   - `ujust ramalama-serve`
+  - `ujust ramalama-smoke`
 - Adds conservative sysctl hardening that does not disable rootless containers.
 - Adds a systemd user drop-in expressing the intended OpenClaw gateway bind as
   loopback-only.
@@ -62,11 +73,20 @@ After rebasing and rebooting:
 
 ```bash
 ujust ai-doctor
-ujust ai-node-bootstrap
+ujust agent-container-create
+ujust agent-container-bootstrap-node
 ```
 
-This uses Bluefin's Homebrew installation to install or activate `fnm`, then
-installs Node 24 for your user.
+This creates a rootless Ubuntu 24.04 Distrobox for agent tooling, then installs
+Homebrew and `fnm` inside that container for Node 24. The host-level
+`ujust ai-node-bootstrap` remains available, but the container path is preferred
+for npm-heavy agent work.
+
+Enter the environment:
+
+```bash
+ujust agent-container-enter
+```
 
 ## OpenClaw
 
@@ -74,9 +94,24 @@ Install OpenClaw as your normal user:
 
 ```bash
 ujust openclaw-install
-openclaw onboard --install-daemon
+ujust openclaw-gateway-enable
 openclaw doctor
 ss -ltnp | grep 18789
+```
+
+The host gateway path is preferred for the always-on local service because it
+uses user systemd directly. The Distrobox install path remains available for
+experimentation:
+
+```bash
+ujust agent-container-openclaw-install
+```
+
+If OpenClaw requires npm lifecycle scripts to install correctly, use the
+reviewed exception form:
+
+```bash
+ujust openclaw-install latest true
 ```
 
 Expected posture:
@@ -111,12 +146,20 @@ For a specific Hermes repo, install it in a dedicated workspace or container,
 commit lockfiles, and avoid global package installs unless the tool is a CLI you
 explicitly trust.
 
+Preferred workflow:
+
+```bash
+ujust agent-container-enter
+git clone <hermes-repo>
+```
+
 ## Local LLMs
 
 Use RamaLama first for local model serving:
 
 ```bash
-brew install ramalama
+ujust ramalama-bootstrap
+ujust ai-gpu-doctor
 ujust ramalama-serve llama3.2 8080
 ```
 
@@ -151,6 +194,14 @@ podman build \
 ```
 
 Additional rationale is in [docs/SECURITY-RESEARCH.md](docs/SECURITY-RESEARCH.md).
+The host-level `ujust openclaw-install` is kept as a fallback for OpenClaw
+features that cannot run correctly through an integrated Distrobox. Prefer the
+host gateway for the always-on service and the container path for project work.
+
+The containerization/security tradeoffs are in
+[docs/SECURITY-EVALUATION.md](docs/SECURITY-EVALUATION.md).
+The operational pass/fail checks are in
+[docs/FUNCTIONAL-READINESS.md](docs/FUNCTIONAL-READINESS.md).
 
 ## Maintaining The DX Layer
 

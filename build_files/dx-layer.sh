@@ -17,6 +17,7 @@ DX_PACKAGES=(
   cockpit-storaged
   cockpit-system
   dbus-x11
+  distrobox
   edk2-ovmf
   flatpak-builder
   genisoimage
@@ -57,6 +58,7 @@ DX_PACKAGES=(
   virt-manager
   virt-v2v
   virt-viewer
+  vulkan-tools
   ydotool
 )
 

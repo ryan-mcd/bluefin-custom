@@ -51,6 +51,20 @@ jobs:
       - name: Maximize build space
         uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
 
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y just
+
+      - name: Static validation
+        run: |
+          just check
+          bash -n build_files/build.sh
+          bash -n build_files/dx-layer.sh
+          bash -n build_files/bluefin-agent-ubuntu-setup
+          bash -n build_files/bluefin-openclaw-run
+          bash -n build_files/bluefin-dx-groups
+
       - name: Get current date
         id: date
         run: |

@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenClaw local gateway
+Documentation=https://github.com/openclaw/openclaw
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bluefin-openclaw-run gateway
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
