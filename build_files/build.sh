@@ -50,7 +50,7 @@ BLUEFIN_AGENT_USER_GROUPS="$BLUEFIN_AGENT_USER_GROUPS"
 BLUEFIN_AGENT_DENY_GROUPS="$BLUEFIN_AGENT_DENY_GROUPS"
 BLUEFIN_AGENT_ENABLE_LINGER="$BLUEFIN_AGENT_ENABLE_LINGER"
 EOF
-install -Dm0644 /ctx/ai-agents.just /usr/share/ublue-os/just/90-ai-agents.just
+install -Dm0644 /ctx/ai-agents.just /usr/share/ublue-os/just/60-custom.just
 install -Dm0644 /ctx/agent-ubuntu.ini /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
 install -Dm0755 /ctx/bluefin-agent-ubuntu-setup /usr/bin/bluefin-agent-ubuntu-setup
 install -Dm0755 /ctx/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run
@@ -63,7 +63,8 @@ install -Dm0644 /ctx/openclaw-gateway-localhost.conf /etc/systemd/user/openclaw-
 test -x /usr/bin/bluefin-agent-user
 test -x /usr/bin/bluefin-agent-ubuntu-setup
 test -x /usr/bin/bluefin-openclaw-run
-test -f /usr/share/ublue-os/just/90-ai-agents.just
+test -f /usr/share/ublue-os/just/60-custom.just
+/usr/bin/just --justfile /usr/share/ublue-os/justfile --list | grep -q 'ai-doctor'
 
 #### Example for enabling a System Unit File
 
