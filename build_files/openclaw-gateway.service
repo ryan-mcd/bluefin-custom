@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/bluefin-openclaw-run gateway
+ExecStart=/usr/bin/bluefin-openclaw-run gateway
 Restart=on-failure
 RestartSec=5s
 

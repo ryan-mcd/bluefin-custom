@@ -81,7 +81,7 @@ systemctl --user status openclaw-gateway.service
 ss -ltnp | grep 18789
 ```
 
-The gateway service uses `/usr/local/bin/bluefin-openclaw-run`, which sources
+The gateway service uses `/usr/bin/bluefin-openclaw-run`, which sources
 Homebrew and `fnm` before executing `openclaw`. This avoids depending on an
 interactive shell PATH inside systemd.
 

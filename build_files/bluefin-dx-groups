@@ -19,7 +19,7 @@ append_group() {
   fi
 }
 
-agent_user="$(/usr/local/bin/bluefin-agent-user name 2>/dev/null || true)"
+agent_user="$(/usr/bin/bluefin-agent-user name 2>/dev/null || true)"
 
 append_group incus-admin
 append_group libvirt

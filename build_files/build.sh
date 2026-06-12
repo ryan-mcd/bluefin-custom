@@ -52,13 +52,18 @@ BLUEFIN_AGENT_ENABLE_LINGER="$BLUEFIN_AGENT_ENABLE_LINGER"
 EOF
 install -Dm0644 /ctx/ai-agents.just /usr/share/ublue-os/just/90-ai-agents.just
 install -Dm0644 /ctx/agent-ubuntu.ini /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
-install -Dm0755 /ctx/bluefin-agent-ubuntu-setup /usr/local/bin/bluefin-agent-ubuntu-setup
-install -Dm0755 /ctx/bluefin-openclaw-run /usr/local/bin/bluefin-openclaw-run
-install -Dm0755 /ctx/bluefin-agent-user /usr/local/bin/bluefin-agent-user
+install -Dm0755 /ctx/bluefin-agent-ubuntu-setup /usr/bin/bluefin-agent-ubuntu-setup
+install -Dm0755 /ctx/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run
+install -Dm0755 /ctx/bluefin-agent-user /usr/bin/bluefin-agent-user
 install -Dm0644 /ctx/bluefin-agent-user.service /usr/lib/systemd/system/bluefin-agent-user.service
 install -Dm0644 /ctx/openclaw-gateway.service /etc/systemd/user/openclaw-gateway.service
 install -Dm0644 /ctx/sysctl-ai-agent.conf /etc/sysctl.d/90-ai-agent-workstation.conf
 install -Dm0644 /ctx/openclaw-gateway-localhost.conf /etc/systemd/user/openclaw-gateway.service.d/10-localhost-defaults.conf
+
+test -x /usr/bin/bluefin-agent-user
+test -x /usr/bin/bluefin-agent-ubuntu-setup
+test -x /usr/bin/bluefin-openclaw-run
+test -f /usr/share/ublue-os/just/90-ai-agents.just
 
 #### Example for enabling a System Unit File
 

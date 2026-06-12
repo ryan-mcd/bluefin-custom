@@ -72,6 +72,18 @@ ujust ai-doctor
 ujust ai-gpu-doctor
 ```
 
+If `ujust --list` shows the custom recipes but they fail because
+`bluefin-agent-user` is missing, the system is running an image that installed
+image-owned helpers into `/usr/local/bin`. On Bluefin/Fedora atomic systems,
+`/usr/local` is local mutable state and can hide files baked into the image.
+Rebuild and rebase to an image where these helpers live in `/usr/bin`:
+
+```bash
+ls -l /usr/bin/bluefin-agent-user
+ls -l /usr/bin/bluefin-openclaw-run
+ls -l /usr/bin/bluefin-agent-ubuntu-setup
+```
+
 Confirm the dedicated agent user was created and is unprivileged:
 
 ```bash
@@ -208,13 +220,13 @@ OpenClaw as the dedicated agent user through Homebrew-installed `fnm`:
 ```bash
 ujust openclaw-install
 ujust openclaw-gateway-enable
-/usr/local/bin/bluefin-openclaw-run doctor
+/usr/bin/bluefin-openclaw-run doctor
 systemctl --user --no-pager --full status openclaw-gateway.service
 ss -ltnp | grep ':18789'
 ```
 
 Open a new shell before relying on `openclaw` being directly on `PATH`. The
-`/usr/local/bin/bluefin-openclaw-run` wrapper is the stable path used by the
+`/usr/bin/bluefin-openclaw-run` wrapper is the stable path used by the
 systemd user service because it initializes Homebrew and `fnm` first.
 
 If OpenClaw fails to install because it requires npm lifecycle scripts, review
@@ -497,7 +509,7 @@ ujust agent-container-create
 ujust agent-container-bootstrap-node
 ujust openclaw-install
 ujust openclaw-gateway-enable
-/usr/local/bin/bluefin-openclaw-run doctor
+/usr/bin/bluefin-openclaw-run doctor
 ujust ramalama-smoke llama3.2
 ss -ltnp
 ```

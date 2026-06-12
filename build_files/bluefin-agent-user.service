@@ -5,7 +5,7 @@ Before=display-manager.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/bluefin-agent-user setup
+ExecStart=/usr/bin/bluefin-agent-user setup
 
 [Install]
 WantedBy=multi-user.target

@@ -40,8 +40,8 @@ ai-doctor:
 
     echo
     echo "== OpenClaw host wrapper =="
-    if [[ -x /usr/local/bin/bluefin-openclaw-run ]]; then
-      if openclaw_version=$(/usr/local/bin/bluefin-openclaw-run --version 2>/dev/null); then
+    if [[ -x /usr/bin/bluefin-openclaw-run ]]; then
+      if openclaw_version=$(/usr/bin/bluefin-openclaw-run --version 2>/dev/null); then
         echo "bluefin-openclaw-run ${openclaw_version}"
       else
         echo "bluefin-openclaw-run cannot start OpenClaw; run: ujust openclaw-install"
@@ -143,7 +143,7 @@ agent-container-bootstrap-node:
       distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
     fi
 
-    distrobox enter bluefin-agent-ubuntu -- /run/host/usr/local/bin/bluefin-agent-ubuntu-setup --install-node
+    distrobox enter bluefin-agent-ubuntu -- /run/host/usr/bin/bluefin-agent-ubuntu-setup --install-node
 
 agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     #!/usr/bin/env bash
@@ -161,7 +161,7 @@ agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
       script_flag="--ignore-scripts"
     fi
 
-    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; if ! command -v node >/dev/null 2>&1; then /run/host/usr/local/bin/bluefin-agent-ubuntu-setup --install-node; source /etc/profile.d/bluefin-agent.sh; fi; npm view "openclaw@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global '"${script_flag}"' "openclaw@{{ VERSION }}"; openclaw --version || true'
+    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; if ! command -v node >/dev/null 2>&1; then /run/host/usr/bin/bluefin-agent-ubuntu-setup --install-node; source /etc/profile.d/bluefin-agent.sh; fi; npm view "openclaw@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global '"${script_flag}"' "openclaw@{{ VERSION }}"; openclaw --version || true'
 
 agent-container-npm-install-trusted PACKAGE VERSION="latest":
     #!/usr/bin/env bash
@@ -214,7 +214,7 @@ openclaw-gateway-enable:
     set -euo pipefail
 
     bluefin-agent-user require
-    if ! /usr/local/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
+    if ! /usr/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
       ujust openclaw-install
     fi
 
@@ -228,11 +228,11 @@ openclaw-onboard-local:
     set -euo pipefail
 
     bluefin-agent-user require
-    if ! /usr/local/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
+    if ! /usr/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
       ujust openclaw-install
     fi
 
-    /usr/local/bin/bluefin-openclaw-run onboard --install-daemon
+    /usr/bin/bluefin-openclaw-run onboard --install-daemon
     systemctl --user daemon-reload
     ss -ltnp 2>/dev/null | grep ':18789' || true
 
