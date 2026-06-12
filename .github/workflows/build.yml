@@ -23,7 +23,7 @@ env:
   BLUEFIN_AGENT_ENABLE_DOCKER: "false"
   BLUEFIN_AGENT_USER: "claudex"
   BLUEFIN_AGENT_USER_GROUPS: "render"
-  BLUEFIN_AGENT_DENY_GROUPS: "wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video"
+  BLUEFIN_AGENT_DENY_GROUPS: "wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input"
   BLUEFIN_AGENT_ENABLE_LINGER: "false"
 
 concurrency:

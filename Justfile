@@ -4,7 +4,7 @@ export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:l
 export enable_docker := env("BLUEFIN_AGENT_ENABLE_DOCKER", "false")
 export agent_user := env("BLUEFIN_AGENT_USER", "claudex")
 export agent_user_groups := env("BLUEFIN_AGENT_USER_GROUPS", "render")
-export agent_user_deny_groups := env("BLUEFIN_AGENT_DENY_GROUPS", "wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video")
+export agent_user_deny_groups := env("BLUEFIN_AGENT_DENY_GROUPS", "wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input")
 export agent_user_enable_linger := env("BLUEFIN_AGENT_ENABLE_LINGER", "false")
 
 alias build-vm := build-qcow2

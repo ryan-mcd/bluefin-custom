@@ -25,7 +25,7 @@ dnf5 install -y \
 
 : "${BLUEFIN_AGENT_USER:=claudex}"
 : "${BLUEFIN_AGENT_USER_GROUPS:=render}"
-: "${BLUEFIN_AGENT_DENY_GROUPS:=wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video}"
+: "${BLUEFIN_AGENT_DENY_GROUPS:=wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input}"
 : "${BLUEFIN_AGENT_ENABLE_LINGER:=false}"
 
 if [[ ! "$BLUEFIN_AGENT_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then

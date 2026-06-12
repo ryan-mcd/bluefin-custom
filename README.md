@@ -53,6 +53,8 @@ periodically compare it with upstream.
   - `ujust ai-doctor`
   - `ujust ai-gpu-doctor`
   - `ujust agent-user-status`
+  - `ujust agent-user-set-password`
+  - `ujust agent-user-gui-check`
   - `ujust agent-user-enter`
   - `ujust agent-container-create`
   - `ujust agent-container-enter`
@@ -82,6 +84,7 @@ After rebasing and rebooting:
 ```bash
 ujust ai-doctor
 ujust agent-user-status
+ujust agent-user-set-password
 ujust agent-user-enter
 ```
 
@@ -255,8 +258,14 @@ Agent user build variables:
 
 - `BLUEFIN_AGENT_USER`, default `claudex`.
 - `BLUEFIN_AGENT_USER_GROUPS`, default `render`.
-- `BLUEFIN_AGENT_DENY_GROUPS`, default `wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video`.
+- `BLUEFIN_AGENT_DENY_GROUPS`, default `wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input`.
 - `BLUEFIN_AGENT_ENABLE_LINGER`, default `false`.
+
+`video` is intentionally not in the default deny list because some GPU stacks
+may still need it. It is also not granted by default. Start with `render`; if
+`ujust ai-gpu-doctor` shows that local model acceleration requires `video`,
+build with `BLUEFIN_AGENT_USER_GROUPS="render video"` or add it deliberately
+after install.
 
 Build-time configuration is preferred. A root-only runtime override can be
 placed in `/etc/bluefin-agent/agent-user.conf`, then applied with:

@@ -8,7 +8,7 @@ OVERRIDE_CONFIG="/etc/bluefin-agent/agent-user.conf"
 load_config() {
   BLUEFIN_AGENT_USER="${BLUEFIN_AGENT_USER:-claudex}"
   BLUEFIN_AGENT_USER_GROUPS="${BLUEFIN_AGENT_USER_GROUPS:-render}"
-  BLUEFIN_AGENT_DENY_GROUPS="${BLUEFIN_AGENT_DENY_GROUPS:-wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video}"
+  BLUEFIN_AGENT_DENY_GROUPS="${BLUEFIN_AGENT_DENY_GROUPS:-wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input}"
   BLUEFIN_AGENT_ENABLE_LINGER="${BLUEFIN_AGENT_ENABLE_LINGER:-false}"
 
   for config in "$DEFAULT_CONFIG" "$OVERRIDE_CONFIG"; do
@@ -186,6 +186,16 @@ status_user() {
 
   getent passwd "$BLUEFIN_AGENT_USER"
   id "$BLUEFIN_AGENT_USER"
+  local uid
+  uid="$(id -u "$BLUEFIN_AGENT_USER")"
+  if [[ "$uid" =~ ^[0-9]+$ && "$uid" -lt 1000 ]]; then
+    echo "warning: $BLUEFIN_AGENT_USER has UID $uid; graphical login managers commonly hide system users below UID 1000" >&2
+  fi
+  if command -v passwd >/dev/null 2>&1; then
+    if [[ "${EUID}" -eq 0 || "$(id -un)" == "$BLUEFIN_AGENT_USER" ]]; then
+      passwd -S "$BLUEFIN_AGENT_USER" 2>/dev/null || true
+    fi
+  fi
   if command -v loginctl >/dev/null 2>&1; then
     local actual_linger
     actual_linger="$(loginctl show-user "$BLUEFIN_AGENT_USER" -p Linger --value 2>/dev/null || true)"

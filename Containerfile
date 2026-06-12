@@ -8,7 +8,7 @@ FROM ghcr.io/ublue-os/bluefin:stable
 ARG BLUEFIN_AGENT_ENABLE_DOCKER=false
 ARG BLUEFIN_AGENT_USER=claudex
 ARG BLUEFIN_AGENT_USER_GROUPS=render
-ARG BLUEFIN_AGENT_DENY_GROUPS="wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video"
+ARG BLUEFIN_AGENT_DENY_GROUPS="wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input"
 ARG BLUEFIN_AGENT_ENABLE_LINGER=false
 ENV BLUEFIN_AGENT_ENABLE_DOCKER=${BLUEFIN_AGENT_ENABLE_DOCKER}
 ENV BLUEFIN_AGENT_USER=${BLUEFIN_AGENT_USER}

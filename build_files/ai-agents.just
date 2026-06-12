@@ -63,6 +63,25 @@ agent-user-status:
 
     bluefin-agent-user status
 
+agent-user-set-password:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    agent_user="$(bluefin-agent-user name)"
+    sudo passwd "$agent_user"
+
+agent-user-gui-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    agent_user="$(bluefin-agent-user name)"
+    bluefin-agent-user status || true
+    echo
+    echo "== password status =="
+    sudo passwd -S "$agent_user" || true
+    echo
+    echo "If the password status is locked, run: ujust agent-user-set-password"
+
 agent-user-enter:
     #!/usr/bin/env bash
     set -euo pipefail
