@@ -51,6 +51,13 @@ BLUEFIN_AGENT_DENY_GROUPS="$BLUEFIN_AGENT_DENY_GROUPS"
 BLUEFIN_AGENT_ENABLE_LINGER="$BLUEFIN_AGENT_ENABLE_LINGER"
 EOF
 install -Dm0644 /ctx/ai-agents.just /usr/share/ublue-os/just/60-custom.just
+if ! grep -Fq '/usr/share/ublue-os/just/60-custom.just' /usr/share/ublue-os/justfile; then
+  cat >>/usr/share/ublue-os/justfile <<'EOF'
+
+# Bluefin agent custom recipes
+import "/usr/share/ublue-os/just/60-custom.just"
+EOF
+fi
 install -Dm0644 /ctx/agent-ubuntu.ini /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
 install -Dm0755 /ctx/bluefin-agent-ubuntu-setup /usr/bin/bluefin-agent-ubuntu-setup
 install -Dm0755 /ctx/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run
@@ -64,7 +71,12 @@ test -x /usr/bin/bluefin-agent-user
 test -x /usr/bin/bluefin-agent-ubuntu-setup
 test -x /usr/bin/bluefin-openclaw-run
 test -f /usr/share/ublue-os/just/60-custom.just
-/usr/bin/just --justfile /usr/share/ublue-os/justfile --list | grep -q 'ai-doctor'
+ujust_recipes="$(/usr/bin/just --justfile /usr/share/ublue-os/justfile --list)"
+if [[ "$ujust_recipes" != *"ai-doctor"* ]]; then
+  echo "Custom ujust recipes are not visible in /usr/share/ublue-os/justfile" >&2
+  echo "$ujust_recipes" >&2
+  exit 1
+fi
 
 #### Example for enabling a System Unit File
 
