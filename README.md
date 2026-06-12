@@ -51,7 +51,6 @@ periodically compare it with upstream.
   - `ujust agent-container-enter`
   - `ujust agent-container-bootstrap-node`
   - `ujust agent-container-openclaw-install`
-  - `ujust agent-container-openclaw-onboard`
   - `ujust agent-container-npm-install-trusted`
   - `ujust ai-node-bootstrap`
   - `ujust openclaw-install`
@@ -101,7 +100,7 @@ ss -ltnp | grep 18789
 
 The host gateway path is preferred for the always-on local service because it
 uses user systemd directly. The Distrobox install path remains available for
-experimentation:
+CLI experimentation, but it does not install or manage the gateway daemon:
 
 ```bash
 ujust agent-container-openclaw-install

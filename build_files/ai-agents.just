@@ -123,21 +123,6 @@ agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; if ! command -v node >/dev/null 2>&1; then /run/host/usr/local/bin/bluefin-agent-ubuntu-setup --install-node; source /etc/profile.d/bluefin-agent.sh; fi; npm view "openclaw@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global '"${script_flag}"' "openclaw@{{ VERSION }}"; openclaw --version || true'
 
 [group('AI agent host')]
-agent-container-openclaw-onboard:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
-      distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
-    fi
-
-    if ! distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; command -v openclaw >/dev/null 2>&1'; then
-      ujust agent-container-openclaw-install
-    fi
-
-    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; openclaw onboard --install-daemon'
-
-[group('AI agent host')]
 agent-container-npm-install-trusted PACKAGE VERSION="latest":
     #!/usr/bin/env bash
     set -euo pipefail
