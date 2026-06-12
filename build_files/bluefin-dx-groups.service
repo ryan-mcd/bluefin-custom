@@ -1,5 +1,5 @@
 [Unit]
-Description=Add wheel members to incus-admin and libvirt groups
+Description=Add non-agent wheel members to incus-admin and libvirt groups
 
 [Service]
 Type=oneshot

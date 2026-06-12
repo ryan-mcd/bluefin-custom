@@ -6,9 +6,14 @@ defaults. It starts from stock Bluefin and recreates the DX capabilities needed
 for this host instead of depending directly on the `bluefin-dx` image tag.
 
 The image intentionally does not preinstall fast-moving npm agent packages.
-OpenClaw and similar tools should be installed as the normal user through
-Homebrew's `fnm`-managed Node runtime, with npm lifecycle scripts disabled by
-default.
+OpenClaw and similar tools should be installed as the dedicated agent user
+through Homebrew's `fnm`-managed Node runtime, with npm lifecycle scripts
+disabled by default.
+
+Agent work is intended to run as a dedicated unprivileged user. The default
+username is `claudex`, configurable at build time with `BLUEFIN_AGENT_USER`.
+The image creates that account on first boot, keeps it out of admin-equivalent
+groups, and makes the agent `ujust` recipes refuse to run under the wrong user.
 
 ## Base
 
@@ -47,6 +52,8 @@ periodically compare it with upstream.
 - Adds `ujust` recipes for AI workstation setup:
   - `ujust ai-doctor`
   - `ujust ai-gpu-doctor`
+  - `ujust agent-user-status`
+  - `ujust agent-user-enter`
   - `ujust agent-container-create`
   - `ujust agent-container-enter`
   - `ujust agent-container-bootstrap-node`
@@ -61,6 +68,8 @@ periodically compare it with upstream.
   - `ujust ramalama-serve`
   - `ujust ramalama-smoke`
 - Adds conservative sysctl hardening that does not disable rootless containers.
+- Adds a first-boot system service that creates the configured unprivileged
+  agent user, defaulting to `claudex`.
 - Adds a systemd user drop-in expressing the intended OpenClaw gateway bind as
   loopback-only.
 - Keeps OpenClaw, Hermes, model files, npm packages, and skills out of the
@@ -72,6 +81,13 @@ After rebasing and rebooting:
 
 ```bash
 ujust ai-doctor
+ujust agent-user-status
+ujust agent-user-enter
+```
+
+Run the remaining agent setup from the configured unprivileged user:
+
+```bash
 ujust agent-container-create
 ujust agent-container-bootstrap-node
 ```
@@ -89,7 +105,7 @@ ujust agent-container-enter
 
 ## OpenClaw
 
-Install OpenClaw as your normal user:
+Install OpenClaw as the dedicated agent user:
 
 ```bash
 ujust openclaw-install
@@ -201,6 +217,8 @@ The containerization/security tradeoffs are in
 [docs/SECURITY-EVALUATION.md](docs/SECURITY-EVALUATION.md).
 The operational pass/fail checks are in
 [docs/FUNCTIONAL-READINESS.md](docs/FUNCTIONAL-READINESS.md).
+The post-rebase and first-boot runbook is in
+[docs/POST-REBASE-FIRST-BOOT.md](docs/POST-REBASE-FIRST-BOOT.md).
 
 ## Maintaining The DX Layer
 
@@ -217,6 +235,12 @@ Local build:
 just build
 ```
 
+Custom agent username:
+
+```bash
+BLUEFIN_AGENT_USER=agentbox just build
+```
+
 Docker-enabled local build:
 
 ```bash
@@ -225,8 +249,23 @@ BLUEFIN_AGENT_ENABLE_DOCKER=true just build
 
 The GitHub Actions workflow publishes the image to GHCR using the repository
 name. It defaults to `BLUEFIN_AGENT_ENABLE_DOCKER=false`; change that workflow
-environment value to `"true"` for Docker-enabled published images. Configure
-`SIGNING_SECRET` if you want Cosign signing to succeed.
+environment value to `"true"` for Docker-enabled published images.
+
+Agent user build variables:
+
+- `BLUEFIN_AGENT_USER`, default `claudex`.
+- `BLUEFIN_AGENT_USER_GROUPS`, default `render`.
+- `BLUEFIN_AGENT_DENY_GROUPS`, default `wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video`.
+- `BLUEFIN_AGENT_ENABLE_LINGER`, default `false`.
+
+Build-time configuration is preferred. A root-only runtime override can be
+placed in `/etc/bluefin-agent/agent-user.conf`, then applied with:
+
+```bash
+sudo systemctl restart bluefin-agent-user.service
+```
+
+Configure `SIGNING_SECRET` if you want Cosign signing to succeed.
 
 ## Rebase
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Create and constrain the unprivileged Bluefin agent user
+After=systemd-sysusers.service bluefin-dx-groups.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bluefin-agent-user setup
+
+[Install]
+WantedBy=multi-user.target

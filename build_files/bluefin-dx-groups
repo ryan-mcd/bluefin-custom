@@ -19,6 +19,8 @@ append_group() {
   fi
 }
 
+agent_user="$(/usr/local/bin/bluefin-agent-user name 2>/dev/null || true)"
+
 append_group incus-admin
 append_group libvirt
 if command -v docker >/dev/null 2>&1; then
@@ -28,6 +30,10 @@ fi
 readarray -t wheel_users < <(getent group wheel | cut -d ":" -f 4 | tr ',' '\n')
 for user in "${wheel_users[@]}"; do
   if [[ -n "$user" ]]; then
+    if [[ -n "$agent_user" && "$user" == "$agent_user" ]]; then
+      echo "Skipping configured unprivileged agent user: $user"
+      continue
+    fi
     usermod -aG incus-admin "$user"
     usermod -aG libvirt "$user"
     if command -v docker >/dev/null 2>&1; then

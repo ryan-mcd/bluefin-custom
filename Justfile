@@ -2,6 +2,10 @@ export image_name := env("IMAGE_NAME", "bluefin-ai-workstation")
 export default_tag := env("DEFAULT_TAG", "latest")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
 export enable_docker := env("BLUEFIN_AGENT_ENABLE_DOCKER", "false")
+export agent_user := env("BLUEFIN_AGENT_USER", "claudex")
+export agent_user_groups := env("BLUEFIN_AGENT_USER_GROUPS", "render")
+export agent_user_deny_groups := env("BLUEFIN_AGENT_DENY_GROUPS", "wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video")
+export agent_user_enable_linger := env("BLUEFIN_AGENT_ENABLE_LINGER", "false")
 
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
@@ -90,6 +94,10 @@ build $target_image=image_name $tag=default_tag:
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
     fi
     BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_ENABLE_DOCKER={{ enable_docker }}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_USER={{ agent_user }}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_USER_GROUPS={{ agent_user_groups }}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_DENY_GROUPS={{ agent_user_deny_groups }}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_ENABLE_LINGER={{ agent_user_enable_linger }}")
 
     podman build \
         "${BUILD_ARGS[@]}" \

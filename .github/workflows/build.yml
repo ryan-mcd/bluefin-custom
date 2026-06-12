@@ -21,6 +21,10 @@ env:
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"  # do not edit
   DEFAULT_TAG: "latest"
   BLUEFIN_AGENT_ENABLE_DOCKER: "false"
+  BLUEFIN_AGENT_USER: "claudex"
+  BLUEFIN_AGENT_USER_GROUPS: "render"
+  BLUEFIN_AGENT_DENY_GROUPS: "wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video"
+  BLUEFIN_AGENT_ENABLE_LINGER: "false"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-${{ inputs.brand_name}}-${{ inputs.stream_name }}
@@ -61,6 +65,7 @@ jobs:
           just check
           bash -n build_files/build.sh
           bash -n build_files/dx-layer.sh
+          bash -n build_files/bluefin-agent-user
           bash -n build_files/bluefin-agent-ubuntu-setup
           bash -n build_files/bluefin-openclaw-run
           bash -n build_files/bluefin-dx-groups
@@ -120,6 +125,10 @@ jobs:
           labels: ${{ steps.metadata.outputs.labels }}
           build-args: |
             BLUEFIN_AGENT_ENABLE_DOCKER=${{ env.BLUEFIN_AGENT_ENABLE_DOCKER }}
+            BLUEFIN_AGENT_USER=${{ env.BLUEFIN_AGENT_USER }}
+            BLUEFIN_AGENT_USER_GROUPS=${{ env.BLUEFIN_AGENT_USER_GROUPS }}
+            BLUEFIN_AGENT_DENY_GROUPS=${{ env.BLUEFIN_AGENT_DENY_GROUPS }}
+            BLUEFIN_AGENT_ENABLE_LINGER=${{ env.BLUEFIN_AGENT_ENABLE_LINGER }}
           oci: false
 
       # Rechunk is a script that we use on Universal Blue to make sure there isnt a single huge layer when your image gets published.

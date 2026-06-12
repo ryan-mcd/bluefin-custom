@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DEFAULT_CONFIG="/usr/share/bluefin-agent/agent-user.conf"
+OVERRIDE_CONFIG="/etc/bluefin-agent/agent-user.conf"
+
+load_config() {
+  BLUEFIN_AGENT_USER="${BLUEFIN_AGENT_USER:-claudex}"
+  BLUEFIN_AGENT_USER_GROUPS="${BLUEFIN_AGENT_USER_GROUPS:-render}"
+  BLUEFIN_AGENT_DENY_GROUPS="${BLUEFIN_AGENT_DENY_GROUPS:-wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input video}"
+  BLUEFIN_AGENT_ENABLE_LINGER="${BLUEFIN_AGENT_ENABLE_LINGER:-false}"
+
+  for config in "$DEFAULT_CONFIG" "$OVERRIDE_CONFIG"; do
+    if [[ -r "$config" ]]; then
+      # shellcheck source=/dev/null
+      . "$config"
+    fi
+  done
+
+  if [[ ! "$BLUEFIN_AGENT_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+    echo "Invalid BLUEFIN_AGENT_USER: $BLUEFIN_AGENT_USER" >&2
+    exit 2
+  fi
+
+  for value_name in BLUEFIN_AGENT_USER_GROUPS BLUEFIN_AGENT_DENY_GROUPS; do
+    value="${!value_name}"
+    if [[ ! "$value" =~ ^[-A-Za-z0-9_[:space:]]*$ ]]; then
+      echo "Invalid $value_name: $value" >&2
+      exit 2
+    fi
+  done
+}
+
+split_words() {
+  local value="$1"
+  read -r -a words <<<"$value"
+  printf '%s\n' "${words[@]}"
+}
+
+user_in_group() {
+  local user="$1"
+  local group="$2"
+  id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -Fxq "$group"
+}
+
+direct_sudoers_entry() {
+  local user="$1"
+  [[ "${EUID}" -eq 0 ]] || return 1
+
+  local sudoers_paths=()
+  [[ -r /etc/sudoers ]] && sudoers_paths+=("/etc/sudoers")
+  if [[ -d /etc/sudoers.d ]]; then
+    while IFS= read -r path; do
+      sudoers_paths+=("$path")
+    done < <(find /etc/sudoers.d -maxdepth 1 -type f -readable 2>/dev/null)
+  fi
+
+  [[ "${#sudoers_paths[@]}" -gt 0 ]] || return 1
+  grep -E "^[[:space:]]*${user}[[:space:]]+" "${sudoers_paths[@]}" >/dev/null 2>&1
+}
+
+setup_user() {
+  load_config
+
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "bluefin-agent-user setup must run as root" >&2
+    exit 1
+  fi
+
+  local created="false"
+  if ! getent group "$BLUEFIN_AGENT_USER" >/dev/null 2>&1; then
+    groupadd "$BLUEFIN_AGENT_USER"
+  fi
+
+  if ! getent passwd "$BLUEFIN_AGENT_USER" >/dev/null 2>&1; then
+    useradd \
+      --create-home \
+      --gid "$BLUEFIN_AGENT_USER" \
+      --shell /bin/bash \
+      --comment "Unprivileged AI agent user" \
+      "$BLUEFIN_AGENT_USER"
+    created="true"
+  else
+    usermod --shell /bin/bash "$BLUEFIN_AGENT_USER"
+  fi
+
+  usermod -aG "$BLUEFIN_AGENT_USER" "$BLUEFIN_AGENT_USER"
+
+  if [[ "$created" == "true" ]]; then
+    passwd -l "$BLUEFIN_AGENT_USER" >/dev/null 2>&1 || true
+  fi
+
+  local home
+  home="$(getent passwd "$BLUEFIN_AGENT_USER" | cut -d: -f6)"
+  if [[ -n "$home" ]]; then
+    install -d -m 0700 -o "$BLUEFIN_AGENT_USER" -g "$BLUEFIN_AGENT_USER" "$home"
+  fi
+
+  local allow_group deny_group
+  while read -r allow_group; do
+    [[ -n "$allow_group" ]] || continue
+    while read -r deny_group; do
+      [[ -n "$deny_group" ]] || continue
+      if [[ "$allow_group" == "$deny_group" ]]; then
+        echo "Refusing to add $BLUEFIN_AGENT_USER to denied group $allow_group" >&2
+        exit 1
+      fi
+    done < <(split_words "$BLUEFIN_AGENT_DENY_GROUPS")
+  done < <(split_words "$BLUEFIN_AGENT_USER_GROUPS")
+
+  while read -r deny_group; do
+    [[ -n "$deny_group" ]] || continue
+    if getent group "$deny_group" >/dev/null 2>&1 && user_in_group "$BLUEFIN_AGENT_USER" "$deny_group"; then
+      gpasswd -d "$BLUEFIN_AGENT_USER" "$deny_group" >/dev/null 2>&1 || true
+    fi
+  done < <(split_words "$BLUEFIN_AGENT_DENY_GROUPS")
+
+  while read -r allow_group; do
+    [[ -n "$allow_group" ]] || continue
+    if getent group "$allow_group" >/dev/null 2>&1; then
+      usermod -aG "$allow_group" "$BLUEFIN_AGENT_USER"
+    else
+      echo "Group $allow_group does not exist; skipping agent user membership" >&2
+    fi
+  done < <(split_words "$BLUEFIN_AGENT_USER_GROUPS")
+
+  if direct_sudoers_entry "$BLUEFIN_AGENT_USER"; then
+    echo "Warning: direct sudoers entry found for $BLUEFIN_AGENT_USER; remove it to keep the agent user unprivileged" >&2
+  fi
+
+  case "${BLUEFIN_AGENT_ENABLE_LINGER,,}" in
+    true | yes | 1)
+      if command -v loginctl >/dev/null 2>&1; then
+        loginctl enable-linger "$BLUEFIN_AGENT_USER" || true
+      fi
+      ;;
+  esac
+
+  echo "Configured unprivileged agent user: $BLUEFIN_AGENT_USER"
+}
+
+print_name() {
+  load_config
+  printf '%s\n' "$BLUEFIN_AGENT_USER"
+}
+
+require_user() {
+  load_config
+  local current_user
+  current_user="$(id -un)"
+  if [[ "$current_user" != "$BLUEFIN_AGENT_USER" ]]; then
+    echo "Run this as the unprivileged agent user: $BLUEFIN_AGENT_USER" >&2
+    echo "From an admin user, enter it with: sudo -iu $BLUEFIN_AGENT_USER" >&2
+    exit 1
+  fi
+
+  local deny_group
+  while read -r deny_group; do
+    [[ -n "$deny_group" ]] || continue
+    if getent group "$deny_group" >/dev/null 2>&1 && user_in_group "$BLUEFIN_AGENT_USER" "$deny_group"; then
+      echo "Refusing agent work: $BLUEFIN_AGENT_USER is in denied group $deny_group" >&2
+      exit 1
+    fi
+  done < <(split_words "$BLUEFIN_AGENT_DENY_GROUPS")
+
+  if command -v sudo >/dev/null 2>&1 && sudo -n -v >/dev/null 2>&1; then
+    echo "Refusing agent work: $BLUEFIN_AGENT_USER has passwordless sudo" >&2
+    exit 1
+  fi
+}
+
+status_user() {
+  load_config
+
+  echo "agent user: $BLUEFIN_AGENT_USER"
+  echo "allowed supplemental groups: ${BLUEFIN_AGENT_USER_GROUPS:-none}"
+  echo "denied groups: ${BLUEFIN_AGENT_DENY_GROUPS:-none}"
+  echo "linger requested: ${BLUEFIN_AGENT_ENABLE_LINGER:-false}"
+  echo
+
+  if ! getent passwd "$BLUEFIN_AGENT_USER" >/dev/null 2>&1; then
+    echo "account: missing"
+    return 1
+  fi
+
+  getent passwd "$BLUEFIN_AGENT_USER"
+  id "$BLUEFIN_AGENT_USER"
+  if command -v loginctl >/dev/null 2>&1; then
+    local actual_linger
+    actual_linger="$(loginctl show-user "$BLUEFIN_AGENT_USER" -p Linger --value 2>/dev/null || true)"
+    echo "linger active: ${actual_linger:-unknown}"
+  fi
+
+  local denied_found="false"
+  local deny_group
+  while read -r deny_group; do
+    [[ -n "$deny_group" ]] || continue
+    if getent group "$deny_group" >/dev/null 2>&1 && user_in_group "$BLUEFIN_AGENT_USER" "$deny_group"; then
+      echo "denied group present: $deny_group"
+      denied_found="true"
+    fi
+  done < <(split_words "$BLUEFIN_AGENT_DENY_GROUPS")
+
+  if [[ "$denied_found" == "true" ]]; then
+    return 1
+  fi
+
+  if direct_sudoers_entry "$BLUEFIN_AGENT_USER"; then
+    echo "direct sudoers entry present for: $BLUEFIN_AGENT_USER"
+    return 1
+  fi
+}
+
+case "${1:-status}" in
+  name)
+    print_name
+    ;;
+  require)
+    require_user
+    ;;
+  setup)
+    setup_user
+    ;;
+  status)
+    status_user
+    ;;
+  *)
+    echo "Usage: bluefin-agent-user [name|require|setup|status]" >&2
+    exit 2
+    ;;
+esac

@@ -2,6 +2,14 @@ ai-doctor:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    echo "== agent user =="
+    if command -v bluefin-agent-user >/dev/null 2>&1; then
+      bluefin-agent-user status || true
+    else
+      echo "bluefin-agent-user helper missing"
+    fi
+    echo
+
     echo "== core tools =="
     for cmd in brew fnm node npm podman docker distrobox ramalama openclaw clinfo rocminfo rocm-smi vulkaninfo; do
       if command -v "${cmd}" >/dev/null 2>&1; then
@@ -49,6 +57,22 @@ ai-doctor:
     echo "== listening ports =="
     ss -ltnp 2>/dev/null | grep -E '(:18789|:8080|:12434)' || true
 
+agent-user-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user status
+
+agent-user-enter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    agent_user="$(bluefin-agent-user name)"
+    if [[ "$(id -un)" == "$agent_user" ]]; then
+      exec "${SHELL:-/bin/bash}"
+    fi
+    exec sudo -iu "$agent_user"
+
 ai-gpu-doctor:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -81,18 +105,21 @@ agent-container-create:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
 
 agent-container-enter:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     distrobox enter bluefin-agent-ubuntu
 
 agent-container-bootstrap-node:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
       distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
     fi
@@ -103,6 +130,7 @@ agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
       distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
     fi
@@ -120,6 +148,7 @@ agent-container-npm-install-trusted PACKAGE VERSION="latest":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     echo "This enables npm lifecycle scripts for one reviewed package install inside the Ubuntu agent container."
     distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; npm view "{{ PACKAGE }}@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global --ignore-scripts=false --strict-allow-scripts=false "{{ PACKAGE }}@{{ VERSION }}"'
 
@@ -127,6 +156,7 @@ ai-node-bootstrap NODE_VERSION="24":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! command -v brew >/dev/null 2>&1; then
       echo "Homebrew is required and should be provided by Bluefin."
       exit 1
@@ -145,6 +175,7 @@ openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! command -v fnm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
       ujust ai-node-bootstrap
       eval "$(fnm env --shell bash)"
@@ -163,6 +194,7 @@ openclaw-gateway-enable:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! /usr/local/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
       ujust openclaw-install
     fi
@@ -176,6 +208,7 @@ openclaw-onboard-local:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! /usr/local/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
       ujust openclaw-install
     fi
@@ -188,6 +221,7 @@ hermes-workspace-create NAME="hermes-workspace":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     mkdir -p "${HOME}/src/{{ NAME }}"
     echo "Created ${HOME}/src/{{ NAME }}. Enter the Ubuntu agent container before cloning the Hermes repo:"
     echo "  ujust agent-container-enter"
@@ -198,6 +232,7 @@ ramalama-serve MODEL="llama3.2" PORT="8080":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! command -v ramalama >/dev/null 2>&1; then
       echo "RamaLama is missing. Install with: brew install ramalama"
       exit 1
@@ -210,6 +245,7 @@ ramalama-bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     if ! command -v brew >/dev/null 2>&1; then
       echo "Homebrew is required and should be provided by Bluefin."
       exit 1
@@ -221,6 +257,7 @@ ramalama-smoke MODEL="llama3.2":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    bluefin-agent-user require
     command -v ramalama >/dev/null 2>&1 || ujust ramalama-bootstrap
     ujust ai-gpu-doctor
     ramalama run "{{ MODEL }}" "Reply with only: ok"
