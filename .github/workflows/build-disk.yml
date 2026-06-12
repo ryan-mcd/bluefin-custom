@@ -11,6 +11,7 @@ on:
         type: boolean
       platform:
         required: true
+        default: amd64
         type: choice
         options:
           - amd64
@@ -19,9 +20,11 @@ on:
     branches:
       - main
     paths:
-      - './disk_config/disk.toml'
-      - './disk_config/iso.toml'
-      - './.github/workflows/build-disk.yml'
+      - 'disk_config/disk.toml'
+      - 'disk_config/iso.toml'
+      - 'disk_config/iso-gnome.toml'
+      - 'disk_config/iso-kde.toml'
+      - '.github/workflows/build-disk.yml'
 
 env:
   IMAGE_NAME: ${{ github.event.repository.name }} # output of build.yml, keep in sync
@@ -36,7 +39,7 @@ concurrency:
 jobs:
   build:
     name: Build disk images
-    runs-on: ${{ inputs.platform == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.platform == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +64,7 @@ jobs:
           echo "USER_GID=${USER_GID}" >> ${GITHUB_ENV}
 
       - name: Install dependencies
-        if: inputs.platform == 'arm64'
+        if: github.event_name == 'workflow_dispatch' && inputs.platform == 'arm64'
         run: |
           set -x
           sudo apt update -y

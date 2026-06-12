@@ -32,6 +32,21 @@ ai-doctor:
     fi
 
     echo
+    echo "== OpenClaw host wrapper =="
+    if [[ -x /usr/local/bin/bluefin-openclaw-run ]]; then
+      if openclaw_version=$(/usr/local/bin/bluefin-openclaw-run --version 2>/dev/null); then
+        echo "bluefin-openclaw-run ${openclaw_version}"
+      else
+        echo "bluefin-openclaw-run cannot start OpenClaw; run: ujust openclaw-install"
+      fi
+    else
+      echo "bluefin-openclaw-run missing"
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user --no-pager is-active openclaw-gateway.service 2>/dev/null || true
+    fi
+
+    echo
     echo "== listening ports =="
     ss -ltnp 2>/dev/null | grep -E '(:18789|:8080|:12434)' || true
 
@@ -83,12 +98,20 @@ agent-container-bootstrap-node:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
+      distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
+    fi
+
     distrobox enter bluefin-agent-ubuntu -- /run/host/usr/local/bin/bluefin-agent-ubuntu-setup --install-node
 
 [group('AI agent host')]
 agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     #!/usr/bin/env bash
     set -euo pipefail
+
+    if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
+      distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
+    fi
 
     if [[ "{{ ALLOW_SCRIPTS }}" == "true" ]]; then
       script_flag="--ignore-scripts=false --strict-allow-scripts=false"
@@ -104,7 +127,15 @@ agent-container-openclaw-onboard:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    agent-openclaw onboard --install-daemon
+    if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
+      distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
+    fi
+
+    if ! distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; command -v openclaw >/dev/null 2>&1'; then
+      ujust agent-container-openclaw-install
+    fi
+
+    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; openclaw onboard --install-daemon'
 
 [group('AI agent host')]
 agent-container-npm-install-trusted PACKAGE VERSION="latest":
@@ -157,7 +188,7 @@ openclaw-gateway-enable:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if ! command -v openclaw >/dev/null 2>&1; then
+    if ! /usr/local/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
       ujust openclaw-install
     fi
 
@@ -171,7 +202,11 @@ openclaw-onboard-local:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    openclaw onboard --install-daemon
+    if ! /usr/local/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
+      ujust openclaw-install
+    fi
+
+    /usr/local/bin/bluefin-openclaw-run onboard --install-daemon
     systemctl --user daemon-reload
     ss -ltnp 2>/dev/null | grep ':18789' || true
 
