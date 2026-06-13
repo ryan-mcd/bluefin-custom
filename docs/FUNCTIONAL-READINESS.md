@@ -51,7 +51,9 @@ Why:
 Default secure install:
 
 ```bash
+ujust ai-node-bootstrap
 ujust openclaw-install
+ujust openclaw-gateway-setup
 ujust openclaw-gateway-enable
 ```
 
@@ -81,9 +83,13 @@ systemctl --user status openclaw-gateway.service
 ss -ltnp | grep 18789
 ```
 
-The gateway service uses `/usr/bin/bluefin-openclaw-run`, which sources
-Homebrew and `fnm` before executing `openclaw`. This avoids depending on an
-interactive shell PATH inside systemd.
+The host OpenClaw path requires `fnm` to be provisioned first through
+Bluefin's system-managed Homebrew setup from an account allowed to install
+Homebrew packages. It also runs `openclaw setup` before enabling the gateway so
+`gateway.mode=local` is present in OpenClaw's config. The gateway service uses
+`/usr/bin/bluefin-openclaw-run`, which sources Homebrew and `fnm` before
+executing `openclaw`. This avoids depending on an interactive shell PATH inside
+systemd.
 
 ## npm Lifecycle Scripts
 
@@ -135,7 +141,9 @@ multiple active projects named Hermes, with different runtime expectations.
 The image prepares the right environment:
 
 - Ubuntu 24.04 Distrobox for mutable project dependencies.
-- Node 24 through `fnm`, provisioned outside the agent recipes.
+- Node 24 inside the Distrobox through `ujust agent-container-bootstrap-node`.
+- Host Node 24 through `ujust ai-node-bootstrap` after host `fnm` is
+  provisioned by the system-managed Homebrew setup.
 - Python, build tools, Git LFS, and common native build dependencies.
 - Host GPU diagnostics and model-serving hooks.
 
@@ -163,7 +171,9 @@ ujust agent-user-status
 ujust agent-user-enter
 ujust agent-container-create
 ujust agent-container-bootstrap-node
+ujust ai-node-bootstrap
 ujust openclaw-install
+ujust openclaw-gateway-setup
 ujust openclaw-gateway-enable
 ujust ramalama-smoke llama3.2
 ```

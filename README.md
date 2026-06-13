@@ -62,6 +62,7 @@ periodically compare it with upstream.
   - `ujust agent-container-npm-install-trusted`
   - `ujust ai-node-bootstrap`
   - `ujust openclaw-install`
+  - `ujust openclaw-gateway-setup`
   - `ujust openclaw-gateway-enable`
   - `ujust openclaw-onboard-local`
   - `ujust hermes-workspace-create`
@@ -95,10 +96,10 @@ ujust agent-container-bootstrap-node
 ```
 
 This creates a rootless Ubuntu 24.04 Distrobox for agent tooling, then prepares
-Node 24 through `fnm`. The host-level `ujust ai-node-bootstrap` remains
-available when `fnm` has already been provisioned through Bluefin's
-system-managed Homebrew setup, but the container path is preferred for
-npm-heavy agent work.
+Node 24 inside that container. Host-level OpenClaw and RamaLama recipes require
+`fnm` and `ramalama` to be provisioned first through Bluefin's system-managed
+Homebrew setup from an account allowed to install Homebrew packages. The
+container path is preferred for npm-heavy agent work.
 
 Enter the environment:
 
@@ -111,7 +112,9 @@ ujust agent-container-enter
 Install OpenClaw as the dedicated agent user:
 
 ```bash
+ujust ai-node-bootstrap
 ujust openclaw-install
+ujust openclaw-gateway-setup
 ujust openclaw-gateway-enable
 openclaw doctor
 ss -ltnp | grep 18789
@@ -131,6 +134,12 @@ reviewed exception form:
 ```bash
 ujust openclaw-install latest true
 ```
+
+If the gateway reports that an existing config is missing `gateway.mode`, do
+not start it with `--allow-unconfigured` for normal use. Run
+`ujust openclaw-gateway-setup` to initialize or repair the baseline local
+gateway config, or run `ujust openclaw-onboard-local` for the full interactive
+local setup.
 
 Expected posture:
 
@@ -158,7 +167,9 @@ There are multiple active projects named Hermes. This image prepares the host
 for Hermes-style LLM/reasoning workloads without guessing which one you intend
 to run:
 
-- Node 24 via `fnm` for TypeScript/agent projects.
+- Node 24 inside the Ubuntu Distrobox for TypeScript/agent projects.
+- Ubuntu Distrobox bootstrap for project-local JavaScript and Python
+  dependencies.
 - Python/container-friendly Bluefin base with local DX tooling for research
   repos.
 - RamaLama and Podman paths for local OpenAI-compatible endpoints.

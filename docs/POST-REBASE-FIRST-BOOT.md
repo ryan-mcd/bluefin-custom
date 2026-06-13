@@ -143,6 +143,34 @@ From an admin shell, you can still enter the user without a separate GUI login:
 ujust agent-user-enter
 ```
 
+Before relying on host-level OpenClaw or RamaLama recipes, provision the host
+Homebrew packages from an account allowed to manage Bluefin's Homebrew setup.
+The agent recipes can use these packages, but they intentionally do not install
+or upgrade Homebrew packages as the unprivileged agent user:
+
+```bash
+if command -v brew >/dev/null 2>&1; then
+  eval "$(brew shellenv)"
+elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+fi
+brew install fnm ramalama
+```
+
+Confirm the configured agent user can see the host-managed tools:
+
+```bash
+sudo -iu "$(bluefin-agent-user name)" bash -lc '
+if command -v brew >/dev/null 2>&1; then
+  eval "$(brew shellenv)"
+elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+fi
+command -v fnm
+command -v ramalama
+'
+```
+
 The account has no privileged group memberships.
 Do not add this user to `wheel`, `sudo`, `docker`, `libvirt`, `incus-admin`,
 `lxd`, `kvm`, `qemu`, `mock`, `wireshark`, or `input` unless you are
@@ -213,11 +241,13 @@ display session, SSH agent, devices, and host command paths.
 ## OpenClaw Startup
 
 The supported always-on OpenClaw gateway path is host-level user systemd. Install
-OpenClaw as the dedicated agent user after `fnm` has been provisioned through
-Bluefin's system-managed Homebrew setup:
+OpenClaw as the dedicated agent user after the host `fnm` prerequisite above has
+been verified:
 
 ```bash
+ujust ai-node-bootstrap
 ujust openclaw-install
+ujust openclaw-gateway-setup
 ujust openclaw-gateway-enable
 /usr/bin/bluefin-openclaw-run doctor
 systemctl --user --no-pager --full status openclaw-gateway.service
@@ -237,12 +267,24 @@ ujust openclaw-install latest true
 ujust openclaw-gateway-enable
 ```
 
-If OpenClaw's pairing/onboarding workflow explicitly asks to install its daemon,
-use the host recipe, not the Distrobox path:
+If the gateway service fails with a missing `gateway.mode`, treat the config as
+incomplete or clobbered rather than bypassing the guardrail:
+
+```bash
+ujust openclaw-gateway-setup
+systemctl --user reset-failed openclaw-gateway.service
+ujust openclaw-gateway-enable
+```
+
+If you want the full guided setup instead of the baseline config repair, run:
 
 ```bash
 ujust openclaw-onboard-local
 ```
+
+Use the host onboarding recipe, not the Distrobox path. The image provides the
+systemd user service, so this recipe runs local onboarding without asking
+OpenClaw to install a second daemon.
 
 The Distrobox OpenClaw install is for CLI experimentation only:
 
@@ -504,7 +546,9 @@ ujust agent-user-status
 ujust agent-user-enter
 ujust agent-container-create
 ujust agent-container-bootstrap-node
+ujust ai-node-bootstrap
 ujust openclaw-install
+ujust openclaw-gateway-setup
 ujust openclaw-gateway-enable
 /usr/bin/bluefin-openclaw-run doctor
 ujust ramalama-smoke llama3.2

@@ -233,14 +233,25 @@ openclaw-gateway-enable:
     set -euo pipefail
 
     bluefin-agent-user require
+    ujust openclaw-gateway-setup
+
+    systemctl --user daemon-reload
+    systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
+    systemctl --user enable --now openclaw-gateway.service
+    systemctl --user --no-pager --full status openclaw-gateway.service || true
+    ss -ltnp 2>/dev/null | grep ':18789' || true
+
+openclaw-gateway-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
     if ! /usr/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
       ujust openclaw-install
     fi
 
-    systemctl --user daemon-reload
-    systemctl --user enable --now openclaw-gateway.service
-    systemctl --user --no-pager --full status openclaw-gateway.service || true
-    ss -ltnp 2>/dev/null | grep ':18789' || true
+    /usr/bin/bluefin-openclaw-run setup
+    /usr/bin/bluefin-openclaw-run doctor || true
 
 openclaw-onboard-local:
     #!/usr/bin/env bash
@@ -251,8 +262,10 @@ openclaw-onboard-local:
       ujust openclaw-install
     fi
 
-    /usr/bin/bluefin-openclaw-run onboard --install-daemon
+    /usr/bin/bluefin-openclaw-run onboard --mode local
     systemctl --user daemon-reload
+    systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
+    systemctl --user enable --now openclaw-gateway.service
     ss -ltnp 2>/dev/null | grep ':18789' || true
 
 hermes-workspace-create NAME="hermes-workspace":
