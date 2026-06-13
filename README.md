@@ -45,7 +45,6 @@ periodically compare it with upstream.
   `openssl`, `ripgrep`, and `tmux`.
 - Adds `/etc/npmrc` supply-chain defaults:
   - `ignore-scripts=true`
-  - `strict-allow-scripts=true`
   - `save-exact=true`
   - `provenance=true`
   - `audit=true`
@@ -95,10 +94,11 @@ ujust agent-container-create
 ujust agent-container-bootstrap-node
 ```
 
-This creates a rootless Ubuntu 24.04 Distrobox for agent tooling, then installs
-Homebrew and `fnm` inside that container for Node 24. The host-level
-`ujust ai-node-bootstrap` remains available, but the container path is preferred
-for npm-heavy agent work.
+This creates a rootless Ubuntu 24.04 Distrobox for agent tooling, then prepares
+Node 24 through `fnm`. The host-level `ujust ai-node-bootstrap` remains
+available when `fnm` has already been provisioned through Bluefin's
+system-managed Homebrew setup, but the container path is preferred for
+npm-heavy agent work.
 
 Enter the environment:
 
@@ -148,6 +148,10 @@ agents:
 Treat OpenClaw skills as executable code. Review skill contents, pin sources,
 and avoid broad filesystem or network permissions for untrusted skills.
 
+The host recipes do not install Homebrew packages as the agent user. If `fnm`
+or `ramalama` is missing, install it through the system-managed Bluefin
+Homebrew flow, then rerun the relevant `ujust` recipe.
+
 ## Hermes
 
 There are multiple active projects named Hermes. This image prepares the host
@@ -176,7 +180,6 @@ git clone <hermes-repo>
 Use RamaLama first for local model serving:
 
 ```bash
-ujust ramalama-bootstrap
 ujust ai-gpu-doctor
 ujust ramalama-serve llama3.2 8080
 ```

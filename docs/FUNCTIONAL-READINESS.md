@@ -102,10 +102,9 @@ Reviewed exception:
 ujust agent-container-npm-install-trusted <package> <version>
 ```
 
-The exception sets `--ignore-scripts=false` and
-`--strict-allow-scripts=false` only for that command. Use it only after
-inspecting the package metadata and source. This is less convenient, but it
-prevents the common case where transitive packages run code during install
+The exception sets `--ignore-scripts=false` only for that command. Use it only
+after inspecting the package metadata and source. This is less convenient, but
+it prevents the common case where transitive packages run code during install
 without review.
 
 ## Local Models
@@ -122,7 +121,6 @@ ujust ai-gpu-doctor
 Install and test RamaLama:
 
 ```bash
-ujust ramalama-bootstrap
 ujust ramalama-smoke llama3.2
 ```
 
@@ -137,7 +135,7 @@ multiple active projects named Hermes, with different runtime expectations.
 The image prepares the right environment:
 
 - Ubuntu 24.04 Distrobox for mutable project dependencies.
-- Node 24 through Homebrew-installed `fnm`.
+- Node 24 through `fnm`, provisioned outside the agent recipes.
 - Python, build tools, Git LFS, and common native build dependencies.
 - Host GPU diagnostics and model-serving hooks.
 

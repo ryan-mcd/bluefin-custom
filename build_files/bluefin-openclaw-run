@@ -2,12 +2,21 @@
 
 set -euo pipefail
 
-if [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+if command -v brew >/dev/null 2>&1; then
+  eval "$(brew shellenv)"
+elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
   eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 fi
 
 if command -v fnm >/dev/null 2>&1; then
   eval "$(fnm env --shell bash)"
+fi
+
+if command -v npm >/dev/null 2>&1; then
+  npm_global_bin="$(npm prefix --global 2>/dev/null)/bin"
+  if [[ -d "${npm_global_bin}" ]]; then
+    export PATH="${npm_global_bin}:${PATH}"
+  fi
 fi
 
 exec openclaw "$@"

@@ -197,14 +197,12 @@ Inside the container, confirm Node and npm policy:
 node --version
 npm --version
 npm config get ignore-scripts
-npm config get strict-allow-scripts
 npm config get save-exact
 ```
 
 Expected defaults:
 
 - `ignore-scripts` should be `true`.
-- `strict-allow-scripts` should be `true`.
 - `save-exact` should be `true`.
 
 Use Distrobox for Hermes project checkouts, npm experiments, Python tooling, and
@@ -215,7 +213,8 @@ display session, SSH agent, devices, and host command paths.
 ## OpenClaw Startup
 
 The supported always-on OpenClaw gateway path is host-level user systemd. Install
-OpenClaw as the dedicated agent user through Homebrew-installed `fnm`:
+OpenClaw as the dedicated agent user after `fnm` has been provisioned through
+Bluefin's system-managed Homebrew setup:
 
 ```bash
 ujust openclaw-install
@@ -297,7 +296,6 @@ agent, run its smallest smoke test and inspect its dependency lockfiles.
 Start with RamaLama and the GPU diagnostics shipped by the image:
 
 ```bash
-ujust ramalama-bootstrap
 ujust ai-gpu-doctor
 ujust ramalama-smoke llama3.2
 ```
@@ -458,7 +456,6 @@ On the host and inside the Ubuntu agent container:
 
 ```bash
 npm config get ignore-scripts
-npm config get strict-allow-scripts
 npm config get save-exact
 ```
 

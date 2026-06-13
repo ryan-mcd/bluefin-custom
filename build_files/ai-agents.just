@@ -32,7 +32,6 @@ ai-doctor:
     if command -v npm >/dev/null 2>&1; then
       npm config get registry
       npm config get ignore-scripts
-      npm config get strict-allow-scripts
       npm config get save-exact
     else
       echo "npm missing; run: ujust ai-node-bootstrap"
@@ -155,7 +154,7 @@ agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     fi
 
     if [[ "{{ ALLOW_SCRIPTS }}" == "true" ]]; then
-      script_flag="--ignore-scripts=false --strict-allow-scripts=false"
+      script_flag="--ignore-scripts=false"
       echo "Installing with npm lifecycle scripts enabled for this command."
     else
       script_flag="--ignore-scripts"
@@ -169,41 +168,61 @@ agent-container-npm-install-trusted PACKAGE VERSION="latest":
 
     bluefin-agent-user require
     echo "This enables npm lifecycle scripts for one reviewed package install inside the Ubuntu agent container."
-    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; npm view "{{ PACKAGE }}@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global --ignore-scripts=false --strict-allow-scripts=false "{{ PACKAGE }}@{{ VERSION }}"'
+    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; npm view "{{ PACKAGE }}@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global --ignore-scripts=false "{{ PACKAGE }}@{{ VERSION }}"'
 
 ai-node-bootstrap NODE_VERSION="24":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    if ! command -v brew >/dev/null 2>&1; then
-      echo "Homebrew is required and should be provided by Bluefin."
-      exit 1
+    if command -v brew >/dev/null 2>&1; then
+      eval "$(brew shellenv)"
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
     fi
 
-    brew list fnm >/dev/null 2>&1 || brew install fnm
+    if ! command -v fnm >/dev/null 2>&1; then
+      echo "fnm is required but is not installed or not on PATH."
+      echo "Install fnm through the system-managed Homebrew setup, then rerun this recipe."
+      exit 1
+    fi
     eval "$(fnm env --shell bash)"
     fnm install "{{ NODE_VERSION }}"
     fnm default "{{ NODE_VERSION }}"
 
     echo "Node: $(node --version)"
     echo "npm:  $(npm --version)"
-    echo "System npm policy: ignore-scripts=$(npm config get ignore-scripts), strict-allow-scripts=$(npm config get strict-allow-scripts)"
+    echo "System npm policy: ignore-scripts=$(npm config get ignore-scripts)"
 
 openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    if ! command -v fnm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+    if command -v brew >/dev/null 2>&1; then
+      eval "$(brew shellenv)"
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    fi
+    if ! command -v fnm >/dev/null 2>&1; then
+      echo "fnm is required but is not installed or not on PATH."
+      echo "Install fnm through the system-managed Homebrew setup, then rerun this recipe."
+      exit 1
+    fi
+    eval "$(fnm env --shell bash)"
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
       ujust ai-node-bootstrap
       eval "$(fnm env --shell bash)"
+    fi
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+      echo "Node and npm are required. Install fnm through the system-managed Homebrew setup, then rerun this recipe."
+      exit 1
     fi
 
     echo "Inspecting package metadata before install:"
     npm view "openclaw@{{ VERSION }}" name version dist.integrity dist.tarball --json
     if [[ "{{ ALLOW_SCRIPTS }}" == "true" ]]; then
-      npm install --global --ignore-scripts=false --strict-allow-scripts=false "openclaw@{{ VERSION }}"
+      npm install --global --ignore-scripts=false "openclaw@{{ VERSION }}"
     else
       npm install --global --ignore-scripts "openclaw@{{ VERSION }}"
     fi
@@ -252,8 +271,13 @@ ramalama-serve MODEL="llama3.2" PORT="8080":
     set -euo pipefail
 
     bluefin-agent-user require
+    if command -v brew >/dev/null 2>&1; then
+      eval "$(brew shellenv)"
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    fi
     if ! command -v ramalama >/dev/null 2>&1; then
-      echo "RamaLama is missing. Install with: brew install ramalama"
+      echo "RamaLama is missing. Install it through the system-managed Homebrew setup, then rerun this recipe."
       exit 1
     fi
 
@@ -265,11 +289,16 @@ ramalama-bootstrap:
     set -euo pipefail
 
     bluefin-agent-user require
-    if ! command -v brew >/dev/null 2>&1; then
-      echo "Homebrew is required and should be provided by Bluefin."
+    if command -v brew >/dev/null 2>&1; then
+      eval "$(brew shellenv)"
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    fi
+    if ! command -v ramalama >/dev/null 2>&1; then
+      echo "RamaLama is required but is not installed or not on PATH."
+      echo "Install ramalama through the system-managed Homebrew setup, then rerun this recipe."
       exit 1
     fi
-    brew list ramalama >/dev/null 2>&1 || brew install ramalama
     ramalama --version
 
 ramalama-smoke MODEL="llama3.2":
@@ -277,6 +306,11 @@ ramalama-smoke MODEL="llama3.2":
     set -euo pipefail
 
     bluefin-agent-user require
+    if command -v brew >/dev/null 2>&1; then
+      eval "$(brew shellenv)"
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    fi
     command -v ramalama >/dev/null 2>&1 || ujust ramalama-bootstrap
     ujust ai-gpu-doctor
     ramalama run "{{ MODEL }}" "Reply with only: ok"
