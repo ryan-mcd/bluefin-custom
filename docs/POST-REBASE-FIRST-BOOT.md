@@ -116,19 +116,27 @@ systemctl reboot
 
 ## First Boot Setup
 
-Agent work should run as the configured unprivileged user, `claudex` by default.
-The account is created as a regular local user before GDM starts, but its
-password is locked until you set one from an admin account. This is intentional:
-the image should not ship with a password or password hash.
+Run these blocks in order. An admin shell means an account allowed to use
+`sudo` and manage Bluefin's system Homebrew installation. An agent shell means
+the dedicated unprivileged agent user, `claudex` by default.
+
+### 1. Admin Shell: Unlock The Agent User
+
+Agent work should run as the configured unprivileged user. The account is
+created as a regular local user before GDM starts, but its password is locked
+until an admin sets one. This is intentional: the image should not ship with a
+password or password hash.
+
+```bash
+ujust agent-user-status
+ujust agent-user-gui-check
+id "$(bluefin-agent-user name)"
+ujust agent-user-set-password
+```
+
 The generated account should have UID 1000 or higher. If `ujust
 agent-user-status` warns about a UID below 1000, recreate the account as a
 normal user before expecting GDM to list it.
-
-Enable GNOME login:
-
-```bash
-ujust agent-user-set-password
-```
 
 Then log out, switch user, or use GDM's "Not listed?" flow and sign in as the
 configured username. If you changed the build-time username, get it with:
@@ -143,10 +151,14 @@ From an admin shell, you can still enter the user without a separate GUI login:
 ujust agent-user-enter
 ```
 
-Before relying on host-level OpenClaw or RamaLama recipes, provision the host
-Homebrew packages from an account allowed to manage Bluefin's Homebrew setup.
-The agent recipes can use these packages, but they intentionally do not install
-or upgrade Homebrew packages as the unprivileged agent user:
+### 2. Admin Shell: Provision Host Prerequisites
+
+Provision host Homebrew packages before running host-level OpenClaw or RamaLama
+recipes. The agent recipes can use these packages, but they intentionally do
+not install or upgrade Homebrew packages as the unprivileged agent user.
+
+`fnm` supplies the host Node runtime used by the OpenClaw gateway wrapper.
+`ramalama` supplies the local model runtime used for the local LLM smoke test.
 
 ```bash
 if command -v brew >/dev/null 2>&1; then
@@ -167,16 +179,19 @@ elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
   eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 fi
 command -v fnm
+fnm --version
 command -v ramalama
+ramalama --version
 '
 ```
 
-The account has no privileged group memberships.
-Do not add this user to `wheel`, `sudo`, `docker`, `libvirt`, `incus-admin`,
-`lxd`, `kvm`, `qemu`, `mock`, `wireshark`, or `input` unless you are
-intentionally changing the threat model. The default supplemental group is
-`render` so local GPU/model workloads can use render devices without granting
-admin-equivalent access.
+### 3. Admin Shell: Make Account Boundary Choices
+
+The account should not have privileged group memberships. Do not add this user
+to `wheel`, `sudo`, `docker`, `libvirt`, `incus-admin`, `lxd`, `kvm`, `qemu`,
+`mock`, `wireshark`, or `input` unless you are intentionally changing the
+threat model. The default supplemental group is `render` so local GPU/model
+workloads can use render devices without granting admin-equivalent access.
 
 For a local GNOME login, `input` group membership is not required. The active
 seat gets device access through `systemd-logind`; adding persistent `input`
@@ -185,8 +200,8 @@ session boundary.
 
 `video` is handled differently: do not grant it automatically, but do not treat
 it as forbidden. Some GPU stacks still require `video` for acceleration. Start
-without it, run `ujust ai-gpu-doctor`, and only add it if diagnostics or the
-model runtime prove it is needed:
+without it, run the GPU and model smoke tests below, and only add it if
+diagnostics or the model runtime prove it is needed:
 
 ```bash
 sudo usermod -aG video "$(bluefin-agent-user name)"
@@ -209,23 +224,26 @@ sudo loginctl enable-linger "$(bluefin-agent-user name)"
 You can also build that default into the image with
 `BLUEFIN_AGENT_ENABLE_LINGER=true`.
 
-From the agent user, create the Ubuntu 24.04 Distrobox environment used for
-high-churn agent and project dependencies:
+### 4. Agent Shell: Create The Agent Container
+
+Create the Ubuntu 24.04 Distrobox environment used for high-churn agent and
+project dependencies:
 
 ```bash
+bluefin-agent-user require
 ujust agent-container-create
 ujust agent-container-bootstrap-node
-ujust agent-container-enter
-ujust ai-gpu-doctor
 ```
 
 Inside the container, confirm Node and npm policy:
 
 ```bash
+ujust agent-container-enter
 node --version
 npm --version
 npm config get ignore-scripts
 npm config get save-exact
+exit
 ```
 
 Expected defaults:
@@ -238,16 +256,46 @@ agent CLI testing. Treat it as an operational boundary, not a strong sandbox:
 the default container intentionally integrates with your home directory,
 display session, SSH agent, devices, and host command paths.
 
+### 5. Agent Shell: Validate Local LLM Runtime
+
+Validate the local model path before installing OpenClaw. OpenClaw can be
+installed without a local model server, but this host is intended for local LLM
+work; GPU or RamaLama failures should be found before the gateway is configured.
+
+```bash
+ujust ai-gpu-doctor
+ujust ramalama-bootstrap
+ujust ramalama-smoke llama3.2
+```
+
+When you need a long-running OpenAI-compatible endpoint, start it after the
+smoke test:
+
+```bash
+ujust ramalama-serve llama3.2 8080
+```
+
+Then verify the bind address from another shell:
+
+```bash
+ss -ltnp | grep ':8080'
+```
+
+Confirm model endpoints bind only to loopback before using them with agents. If
+you see `0.0.0.0:8080` or another non-loopback bind, stop the service and add an
+explicit local-only bind option for that model server, or block the port at the
+firewall before continuing.
+
 ## OpenClaw Startup
 
 The supported always-on OpenClaw gateway path is host-level user systemd. Install
-OpenClaw as the dedicated agent user after the host `fnm` prerequisite above has
-been verified:
+OpenClaw as the dedicated agent user after the host `fnm` prerequisite and local
+LLM smoke test above have been verified:
 
 ```bash
 ujust ai-node-bootstrap
 ujust openclaw-install
-ujust openclaw-gateway-setup
+ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
 /usr/bin/bluefin-openclaw-run doctor
 systemctl --user --no-pager --full status openclaw-gateway.service
@@ -257,6 +305,16 @@ ss -ltnp | grep ':18789'
 Open a new shell before relying on `openclaw` being directly on `PATH`. The
 `/usr/bin/bluefin-openclaw-run` wrapper is the stable path used by the
 systemd user service because it initializes Homebrew and `fnm` first.
+
+The default gateway configuration recipe intentionally does not run OpenClaw's
+guided setup. It creates the default `~/.openclaw/workspace` directory, uses
+`openclaw config set gateway.mode local`, validates the config, and leaves model
+auth, channels, pairing, plugins, and other onboarding choices for a deliberate
+onboarding step.
+
+If config validation fails because the file is malformed or clobbered, inspect
+the `doctor` output and use `/usr/bin/bluefin-openclaw-run doctor --fix`
+deliberately before rerunning the configuration recipe.
 
 If OpenClaw fails to install because it requires npm lifecycle scripts, review
 the package metadata and source, then use the explicit exception form:
@@ -271,12 +329,16 @@ If the gateway service fails with a missing `gateway.mode`, treat the config as
 incomplete or clobbered rather than bypassing the guardrail:
 
 ```bash
-ujust openclaw-gateway-setup
+ujust openclaw-gateway-configure-local
 systemctl --user reset-failed openclaw-gateway.service
 ujust openclaw-gateway-enable
 ```
 
-If you want the full guided setup instead of the baseline config repair, run:
+`ujust openclaw-gateway-setup` is kept as a compatibility alias for
+`ujust openclaw-gateway-configure-local`.
+
+If you want the full guided OpenClaw setup instead of only the minimal local
+gateway config, run:
 
 ```bash
 ujust openclaw-onboard-local
@@ -332,27 +394,6 @@ python -m pip install -r requirements.txt
 
 Before granting broad filesystem, shell, browser, or network access to a Hermes
 agent, run its smallest smoke test and inspect its dependency lockfiles.
-
-## Local Model Startup
-
-Start with RamaLama and the GPU diagnostics shipped by the image:
-
-```bash
-ujust ai-gpu-doctor
-ujust ramalama-smoke llama3.2
-```
-
-Serve a local OpenAI-compatible endpoint:
-
-```bash
-ujust ramalama-serve llama3.2 8080
-ss -ltnp | grep ':8080'
-```
-
-Confirm model endpoints bind only to loopback before using them with agents. If
-you see `0.0.0.0:8080` or another non-loopback bind, stop the service and add an
-explicit local-only bind option for that model server, or block the port at the
-firewall before continuing.
 
 ## Lockdown Checklist
 
@@ -546,12 +587,13 @@ ujust agent-user-status
 ujust agent-user-enter
 ujust agent-container-create
 ujust agent-container-bootstrap-node
+ujust ramalama-bootstrap
+ujust ramalama-smoke llama3.2
 ujust ai-node-bootstrap
 ujust openclaw-install
-ujust openclaw-gateway-setup
+ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
 /usr/bin/bluefin-openclaw-run doctor
-ujust ramalama-smoke llama3.2
 ss -ltnp
 ```
 

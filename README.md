@@ -62,6 +62,7 @@ periodically compare it with upstream.
   - `ujust agent-container-npm-install-trusted`
   - `ujust ai-node-bootstrap`
   - `ujust openclaw-install`
+  - `ujust openclaw-gateway-configure-local`
   - `ujust openclaw-gateway-setup`
   - `ujust openclaw-gateway-enable`
   - `ujust openclaw-onboard-local`
@@ -79,27 +80,42 @@ periodically compare it with upstream.
 
 ## First Boot Setup
 
-After rebasing and rebooting:
+After rebasing and rebooting, start from an admin shell. Verify the image, check
+the agent user, set its password, and provision the host-managed Homebrew tools
+that the agent user is allowed to consume:
 
 ```bash
 ujust ai-doctor
+ujust ai-gpu-doctor
 ujust agent-user-status
 ujust agent-user-set-password
-ujust agent-user-enter
+
+if command -v brew >/dev/null 2>&1; then
+  eval "$(brew shellenv)"
+elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+fi
+brew install fnm ramalama
 ```
 
 Run the remaining agent setup from the configured unprivileged user:
 
 ```bash
+ujust agent-user-enter
+bluefin-agent-user require
 ujust agent-container-create
 ujust agent-container-bootstrap-node
+ujust ai-gpu-doctor
+ujust ramalama-bootstrap
+ujust ramalama-smoke llama3.2
 ```
 
-This creates a rootless Ubuntu 24.04 Distrobox for agent tooling, then prepares
-Node 24 inside that container. Host-level OpenClaw and RamaLama recipes require
-`fnm` and `ramalama` to be provisioned first through Bluefin's system-managed
-Homebrew setup from an account allowed to install Homebrew packages. The
-container path is preferred for npm-heavy agent work.
+This creates a rootless Ubuntu 24.04 Distrobox for agent tooling, prepares Node
+24 inside that container, and proves the local model runtime before OpenClaw is
+installed. Host-level OpenClaw and RamaLama recipes require `fnm` and
+`ramalama` to be provisioned first through Bluefin's system-managed Homebrew
+setup from an account allowed to install Homebrew packages. The container path
+is preferred for npm-heavy agent work.
 
 Enter the environment:
 
@@ -107,14 +123,29 @@ Enter the environment:
 ujust agent-container-enter
 ```
 
+## Local LLMs
+
+Use RamaLama first for local model serving. The smoke test should pass before
+OpenClaw is installed for the local gateway workflow:
+
+```bash
+ujust ai-gpu-doctor
+ujust ramalama-bootstrap
+ujust ramalama-smoke llama3.2
+```
+
+For Framework Desktop Strix Halo, Bluefin documents Vulkan-oriented RamaLama
+images as a useful option when ROCm is not the best path.
+
 ## OpenClaw
 
-Install OpenClaw as the dedicated agent user:
+After the host `fnm` prerequisite and local LLM smoke test pass, install
+OpenClaw as the dedicated agent user:
 
 ```bash
 ujust ai-node-bootstrap
 ujust openclaw-install
-ujust openclaw-gateway-setup
+ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
 openclaw doctor
 ss -ltnp | grep 18789
@@ -137,9 +168,19 @@ ujust openclaw-install latest true
 
 If the gateway reports that an existing config is missing `gateway.mode`, do
 not start it with `--allow-unconfigured` for normal use. Run
-`ujust openclaw-gateway-setup` to initialize or repair the baseline local
-gateway config, or run `ujust openclaw-onboard-local` for the full interactive
-local setup.
+`ujust openclaw-gateway-configure-local` to repair the required local gateway
+mode through OpenClaw's own config CLI. The recipe creates the default
+`~/.openclaw/workspace` directory, sets `gateway.mode=local`, validates the
+config, and leaves model auth, channels, pairing, plugins, and other onboarding
+choices untouched.
+
+If config validation fails because the file is malformed or clobbered, inspect
+the `doctor` output and use `/usr/bin/bluefin-openclaw-run doctor --fix`
+deliberately before rerunning the configuration recipe.
+
+`ujust openclaw-gateway-setup` is kept as a compatibility alias for the same
+minimal local gateway configuration. Run `ujust openclaw-onboard-local` only
+when you want OpenClaw's full interactive local setup.
 
 Expected posture:
 
@@ -185,18 +226,6 @@ Preferred workflow:
 ujust agent-container-enter
 git clone <hermes-repo>
 ```
-
-## Local LLMs
-
-Use RamaLama first for local model serving:
-
-```bash
-ujust ai-gpu-doctor
-ujust ramalama-serve llama3.2 8080
-```
-
-For Framework Desktop Strix Halo, Bluefin documents Vulkan-oriented RamaLama
-images as a useful option when ROCm is not the best path.
 
 ## Supply-Chain Operating Rules
 

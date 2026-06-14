@@ -233,7 +233,7 @@ openclaw-gateway-enable:
     set -euo pipefail
 
     bluefin-agent-user require
-    ujust openclaw-gateway-setup
+    ujust openclaw-gateway-configure-local
 
     systemctl --user daemon-reload
     systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
@@ -241,7 +241,7 @@ openclaw-gateway-enable:
     systemctl --user --no-pager --full status openclaw-gateway.service || true
     ss -ltnp 2>/dev/null | grep ':18789' || true
 
-openclaw-gateway-setup:
+openclaw-gateway-configure-local:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -250,8 +250,17 @@ openclaw-gateway-setup:
       ujust openclaw-install
     fi
 
-    /usr/bin/bluefin-openclaw-run setup
+    mkdir -p "${HOME}/.openclaw/workspace"
+    /usr/bin/bluefin-openclaw-run config set gateway.mode local
+    /usr/bin/bluefin-openclaw-run config validate
     /usr/bin/bluefin-openclaw-run doctor || true
+
+openclaw-gateway-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "openclaw-gateway-setup is a compatibility alias for openclaw-gateway-configure-local."
+    ujust openclaw-gateway-configure-local
 
 openclaw-onboard-local:
     #!/usr/bin/env bash

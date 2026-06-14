@@ -35,6 +35,27 @@ only when GPU diagnostics prove it is needed.
 Run OpenClaw, Hermes, RamaLama, and Distrobox setup from that user. The agent
 recipes enforce this with `bluefin-agent-user require`.
 
+## Local Models
+
+Decision: keep model runtimes user-managed, but make host GPU diagnostics first
+class.
+
+The host includes OpenCL, ROCm, and Vulkan diagnostic tooling. Run:
+
+```bash
+ujust ai-gpu-doctor
+```
+
+Install and test RamaLama:
+
+```bash
+ujust ramalama-bootstrap
+ujust ramalama-smoke llama3.2
+```
+
+Use this result to decide whether the Framework Desktop should use Vulkan,
+ROCm/OpenCL, CPU, or a containerized runtime image for a specific model.
+
 ## OpenClaw
 
 Decision: keep the Ubuntu Distrobox path for CLI experimentation, but provide a
@@ -51,11 +72,17 @@ Why:
 Default secure install:
 
 ```bash
+ujust ramalama-bootstrap
+ujust ramalama-smoke llama3.2
 ujust ai-node-bootstrap
 ujust openclaw-install
-ujust openclaw-gateway-setup
+ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
 ```
+
+The RamaLama commands are not OpenClaw install dependencies. They are ordered
+first because this host is intended for local LLM workflows, and GPU/model
+runtime failures should be fixed before the gateway is configured.
 
 If OpenClaw needs npm lifecycle scripts during install:
 
@@ -85,9 +112,12 @@ ss -ltnp | grep 18789
 
 The host OpenClaw path requires `fnm` to be provisioned first through
 Bluefin's system-managed Homebrew setup from an account allowed to install
-Homebrew packages. It also runs `openclaw setup` before enabling the gateway so
-`gateway.mode=local` is present in OpenClaw's config. The gateway service uses
-`/usr/bin/bluefin-openclaw-run`, which sources Homebrew and `fnm` before
+Homebrew packages. Before enabling the gateway, it uses OpenClaw's own
+`config` CLI to set the required `gateway.mode=local` value and validate the
+config. It does not run OpenClaw's guided setup or hand-write the config file.
+Use `ujust openclaw-onboard-local` only when model auth, channel setup, pairing,
+plugins, or other guided onboarding choices are desired. The gateway service
+uses `/usr/bin/bluefin-openclaw-run`, which sources Homebrew and `fnm` before
 executing `openclaw`. This avoids depending on an interactive shell PATH inside
 systemd.
 
@@ -112,26 +142,6 @@ The exception sets `--ignore-scripts=false` only for that command. Use it only
 after inspecting the package metadata and source. This is less convenient, but
 it prevents the common case where transitive packages run code during install
 without review.
-
-## Local Models
-
-Decision: keep model runtimes user-managed, but make host GPU diagnostics first
-class.
-
-The host includes OpenCL, ROCm, and Vulkan diagnostic tooling. Run:
-
-```bash
-ujust ai-gpu-doctor
-```
-
-Install and test RamaLama:
-
-```bash
-ujust ramalama-smoke llama3.2
-```
-
-Use this result to decide whether the Framework Desktop should use Vulkan,
-ROCm/OpenCL, CPU, or a containerized runtime image for a specific model.
 
 ## Hermes
 
@@ -171,11 +181,12 @@ ujust agent-user-status
 ujust agent-user-enter
 ujust agent-container-create
 ujust agent-container-bootstrap-node
+ujust ramalama-bootstrap
+ujust ramalama-smoke llama3.2
 ujust ai-node-bootstrap
 ujust openclaw-install
-ujust openclaw-gateway-setup
+ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
-ujust ramalama-smoke llama3.2
 ```
 
 If OpenClaw requires lifecycle scripts, repeat the install with:
