@@ -219,10 +219,16 @@ linger deliberately:
 
 ```bash
 sudo loginctl enable-linger "$(bluefin-agent-user name)"
+loginctl show-user "$(bluefin-agent-user name)" -p Linger
 ```
 
 You can also build that default into the image with
 `BLUEFIN_AGENT_ENABLE_LINGER=true`.
+
+For an always-on OpenClaw gateway or always-on local model service, enable
+linger before enabling those user services. Without linger, the services are
+tied to the agent user's login/session lifecycle and may not be present after a
+reboot until that user signs in.
 
 ### 4. Agent Shell: Create The Agent Container
 
@@ -286,6 +292,21 @@ you see `0.0.0.0:8080` or another non-loopback bind, stop the service and add an
 explicit local-only bind option for that model server, or block the port at the
 firewall before continuing.
 
+The `ramalama-serve` recipe is a foreground one-off process. It does not create
+a startup service and will not survive reboot. For a user-systemd managed local
+model endpoint:
+
+```bash
+ujust ramalama-service-enable llama3.2 8080
+systemctl --user --no-pager --full status bluefin-ramalama.service
+ss -ltnp | grep ':8080'
+```
+
+This generates a RamaLama Quadlet under
+`~/.config/containers/systemd/bluefin-ramalama.container`, enables
+`bluefin-ramalama.service`, and binds the host side to `127.0.0.1:8080`. It will
+start after reboot only if the agent user has systemd linger enabled.
+
 ## OpenClaw Startup
 
 The supported always-on OpenClaw gateway path is host-level user systemd. Install
@@ -297,7 +318,7 @@ ujust ai-node-bootstrap
 ujust openclaw-install
 ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
-/usr/bin/bluefin-openclaw-run doctor
+OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor
 systemctl --user --no-pager --full status openclaw-gateway.service
 ss -ltnp | grep ':18789'
 ```
@@ -308,13 +329,45 @@ systemd user service because it initializes Homebrew and `fnm` first.
 
 The default gateway configuration recipe intentionally does not run OpenClaw's
 guided setup. It creates the default `~/.openclaw/workspace` directory, uses
-`openclaw config set gateway.mode local`, validates the config, and leaves model
+`openclaw config set gateway.mode local`, generates a gateway auth token when no
+token or password auth already exists, validates the config, and leaves model
 auth, channels, pairing, plugins, and other onboarding choices for a deliberate
 onboarding step.
+
+OpenClaw login for this image means opening the browser Control UI served by the
+local gateway. Run this as the agent user:
+
+```bash
+ujust openclaw-dashboard
+```
+
+That command starts the image-managed gateway if needed, then delegates to
+OpenClaw's own dashboard command so it can pass the current gateway auth to the
+browser. If the browser still asks for a shared secret, read the configured
+token and paste it into the Control UI auth prompt:
+
+```bash
+/usr/bin/bluefin-openclaw-run config get gateway.auth.token
+```
+
+The direct local URL is:
+
+```text
+http://127.0.0.1:18789/
+```
 
 If config validation fails because the file is malformed or clobbered, inspect
 the `doctor` output and use `/usr/bin/bluefin-openclaw-run doctor --fix`
 deliberately before rerunning the configuration recipe.
+
+The image-owned gateway service is managed through `ujust
+openclaw-gateway-enable`, not OpenClaw's own daemon installer. If OpenClaw asks
+whether to update the gateway service config to recommended defaults, answer no
+for this image and rerun doctor with:
+
+```bash
+OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor
+```
 
 If OpenClaw fails to install because it requires npm lifecycle scripts, review
 the package metadata and source, then use the explicit exception form:
@@ -584,16 +637,20 @@ bootc status || rpm-ostree status
 ujust ai-doctor
 ujust ai-gpu-doctor
 ujust agent-user-status
+loginctl show-user "$(bluefin-agent-user name)" -p Linger
 ujust agent-user-enter
 ujust agent-container-create
 ujust agent-container-bootstrap-node
 ujust ramalama-bootstrap
 ujust ramalama-smoke llama3.2
+ujust ramalama-service-enable llama3.2 8080
+systemctl --user --no-pager --full status bluefin-ramalama.service
 ujust ai-node-bootstrap
 ujust openclaw-install
 ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
-/usr/bin/bluefin-openclaw-run doctor
+OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor
+ujust openclaw-dashboard
 ss -ltnp
 ```
 

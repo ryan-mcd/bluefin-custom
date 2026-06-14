@@ -250,10 +250,41 @@ openclaw-gateway-configure-local:
       ujust openclaw-install
     fi
 
+    config_has_value() {
+      local value
+      value="$(/usr/bin/bluefin-openclaw-run config get "$1" 2>/dev/null || true)"
+      value="${value%\"}"
+      value="${value#\"}"
+      [[ -n "${value}" && "${value}" != "null" ]]
+    }
+
     mkdir -p "${HOME}/.openclaw/workspace"
     /usr/bin/bluefin-openclaw-run config set gateway.mode local
+    auth_mode="$(/usr/bin/bluefin-openclaw-run config get gateway.auth.mode 2>/dev/null || true)"
+    auth_mode="${auth_mode%\"}"
+    auth_mode="${auth_mode#\"}"
+    [[ "${auth_mode}" == "null" ]] && auth_mode=""
+    if [[ "${auth_mode}" == "token" ]]; then
+      if ! config_has_value gateway.auth.token; then
+        OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor --generate-gateway-token
+      fi
+    elif [[ -z "${auth_mode}" ]]; then
+      if ! config_has_value gateway.auth.token && ! config_has_value gateway.auth.password; then
+        OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor --generate-gateway-token
+      fi
+    fi
     /usr/bin/bluefin-openclaw-run config validate
-    /usr/bin/bluefin-openclaw-run doctor || true
+    OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor || true
+
+openclaw-dashboard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    if ! systemctl --user is-active --quiet openclaw-gateway.service; then
+      ujust openclaw-gateway-enable
+    fi
+    /usr/bin/bluefin-openclaw-run dashboard
 
 openclaw-gateway-setup:
     #!/usr/bin/env bash
@@ -292,6 +323,9 @@ ramalama-serve MODEL="llama3.2" PORT="8080":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    model="{{ MODEL }}"
+    port="{{ PORT }}"
+
     bluefin-agent-user require
     if command -v brew >/dev/null 2>&1; then
       eval "$(brew shellenv)"
@@ -303,8 +337,52 @@ ramalama-serve MODEL="llama3.2" PORT="8080":
       exit 1
     fi
 
-    echo "Serving ${MODEL} on port ${PORT}. Check firewall exposure before using this on untrusted networks."
-    ramalama serve --port "{{ PORT }}" "{{ MODEL }}"
+    echo "Serving ${model} on port ${port}. Check firewall exposure before using this on untrusted networks."
+    ramalama serve --host 127.0.0.1 --port "${port}" "${model}"
+
+ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    model="{{ MODEL }}"
+    port="{{ PORT }}"
+    name="{{ NAME }}"
+
+    bluefin-agent-user require
+    if command -v brew >/dev/null 2>&1; then
+      eval "$(brew shellenv)"
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    fi
+    if ! command -v ramalama >/dev/null 2>&1; then
+      echo "RamaLama is missing. Install it through the system-managed Homebrew setup, then rerun this recipe."
+      exit 1
+    fi
+
+    mkdir -p "${HOME}/.config/containers/systemd"
+    ramalama serve --host 127.0.0.1 --port "${port}" --webui off --name "${name}" --generate="quadlet:${HOME}/.config/containers/systemd" "${model}"
+    systemctl --user daemon-reload
+    systemctl --user enable "${name}.service"
+    systemctl --user restart "${name}.service"
+    systemctl --user --no-pager --full status "${name}.service" || true
+    ss -ltnp 2>/dev/null | grep ":${port}" || true
+
+ramalama-service-disable NAME="bluefin-ramalama":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    name="{{ NAME }}"
+
+    bluefin-agent-user require
+    if command -v brew >/dev/null 2>&1; then
+      eval "$(brew shellenv)"
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    fi
+    systemctl --user disable --now "${name}.service" || true
+    if command -v ramalama >/dev/null 2>&1; then
+      ramalama stop "${name}" || true
+    fi
 
 ramalama-bootstrap:
     #!/usr/bin/env bash

@@ -62,6 +62,7 @@ periodically compare it with upstream.
   - `ujust agent-container-npm-install-trusted`
   - `ujust ai-node-bootstrap`
   - `ujust openclaw-install`
+  - `ujust openclaw-dashboard`
   - `ujust openclaw-gateway-configure-local`
   - `ujust openclaw-gateway-setup`
   - `ujust openclaw-gateway-enable`
@@ -69,6 +70,8 @@ periodically compare it with upstream.
   - `ujust hermes-workspace-create`
   - `ujust ramalama-bootstrap`
   - `ujust ramalama-serve`
+  - `ujust ramalama-service-enable`
+  - `ujust ramalama-service-disable`
   - `ujust ramalama-smoke`
 - Adds conservative sysctl hardening that does not disable rootless containers.
 - Adds a first-boot system service that creates the configured unprivileged
@@ -134,6 +137,25 @@ ujust ramalama-bootstrap
 ujust ramalama-smoke llama3.2
 ```
 
+For a one-off foreground OpenAI-compatible endpoint:
+
+```bash
+ujust ramalama-serve llama3.2 8080
+```
+
+For an endpoint that should be managed by user systemd:
+
+```bash
+ujust ramalama-service-enable llama3.2 8080
+systemctl --user --no-pager --full status bluefin-ramalama.service
+ss -ltnp | grep ':8080'
+```
+
+The systemd service is still a user service. It starts at boot only when the
+agent user has systemd linger enabled; otherwise it starts when that user's
+systemd session exists. The service recipe keeps the host bind on
+`127.0.0.1:8080`.
+
 For Framework Desktop Strix Halo, Bluefin documents Vulkan-oriented RamaLama
 images as a useful option when ROCm is not the best path.
 
@@ -147,9 +169,28 @@ ujust ai-node-bootstrap
 ujust openclaw-install
 ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
-openclaw doctor
+OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor
 ss -ltnp | grep 18789
 ```
+
+OpenClaw login for this install means opening the browser Control UI served by
+the local gateway. From the agent user, run:
+
+```bash
+ujust openclaw-dashboard
+```
+
+That uses OpenClaw's dashboard command so the current gateway auth can be passed
+to the browser without printing secrets when possible. If the browser still asks
+for a shared secret, use:
+
+```bash
+/usr/bin/bluefin-openclaw-run config get gateway.auth.token
+```
+
+Paste that value into the Control UI auth prompt. The minimal local gateway
+recipe generates a gateway token when neither token nor password auth is already
+configured.
 
 The host gateway path is preferred for the always-on local service because it
 uses user systemd directly. The Distrobox install path remains available for
@@ -177,6 +218,12 @@ choices untouched.
 If config validation fails because the file is malformed or clobbered, inspect
 the `doctor` output and use `/usr/bin/bluefin-openclaw-run doctor --fix`
 deliberately before rerunning the configuration recipe.
+
+The image-owned gateway service is managed through `ujust
+openclaw-gateway-enable`, not OpenClaw's own daemon installer. If OpenClaw asks
+whether to update the gateway service config to recommended defaults, answer no
+for this image and rerun doctor with
+`OPENCLAW_SERVICE_REPAIR_POLICY=external`.
 
 `ujust openclaw-gateway-setup` is kept as a compatibility alias for the same
 minimal local gateway configuration. Run `ujust openclaw-onboard-local` only
@@ -334,4 +381,7 @@ Verify after reboot:
 bootc status
 ujust ai-doctor
 clinfo
+systemctl --user --no-pager --full status openclaw-gateway.service
+systemctl --user --no-pager --full status bluefin-ramalama.service
+ss -ltnp | grep -E ':(18789|8080)'
 ```

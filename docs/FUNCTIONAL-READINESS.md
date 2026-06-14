@@ -56,6 +56,18 @@ ujust ramalama-smoke llama3.2
 Use this result to decide whether the Framework Desktop should use Vulkan,
 ROCm/OpenCL, CPU, or a containerized runtime image for a specific model.
 
+The smoke test only proves the runtime. To keep a local model endpoint available
+after reboot, enable the user systemd service as the agent user:
+
+```bash
+ujust ramalama-service-enable llama3.2 8080
+systemctl --user --no-pager --full status bluefin-ramalama.service
+ss -ltnp | grep ':8080'
+```
+
+The service binds to `127.0.0.1:8080`. It starts at boot only when systemd
+linger has been enabled for the agent user by an admin.
+
 ## OpenClaw
 
 Decision: keep the Ubuntu Distrobox path for CLI experimentation, but provide a
@@ -74,15 +86,19 @@ Default secure install:
 ```bash
 ujust ramalama-bootstrap
 ujust ramalama-smoke llama3.2
+ujust ramalama-service-enable llama3.2 8080
 ujust ai-node-bootstrap
 ujust openclaw-install
 ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
+ujust openclaw-dashboard
 ```
 
 The RamaLama commands are not OpenClaw install dependencies. They are ordered
 first because this host is intended for local LLM workflows, and GPU/model
-runtime failures should be fixed before the gateway is configured.
+runtime failures should be fixed before the gateway is configured. The service
+enable step is required only when a local model endpoint should be available
+after login or reboot.
 
 If OpenClaw needs npm lifecycle scripts during install:
 
@@ -107,19 +123,32 @@ Validation:
 ```bash
 ujust ai-doctor
 systemctl --user status openclaw-gateway.service
+OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor
 ss -ltnp | grep 18789
+ujust openclaw-dashboard
 ```
 
 The host OpenClaw path requires `fnm` to be provisioned first through
 Bluefin's system-managed Homebrew setup from an account allowed to install
 Homebrew packages. Before enabling the gateway, it uses OpenClaw's own
 `config` CLI to set the required `gateway.mode=local` value and validate the
-config. It does not run OpenClaw's guided setup or hand-write the config file.
-Use `ujust openclaw-onboard-local` only when model auth, channel setup, pairing,
-plugins, or other guided onboarding choices are desired. The gateway service
-uses `/usr/bin/bluefin-openclaw-run`, which sources Homebrew and `fnm` before
-executing `openclaw`. This avoids depending on an interactive shell PATH inside
-systemd.
+config. If neither token nor password auth exists, it asks OpenClaw doctor to
+generate a gateway token. It does not run OpenClaw's guided setup or hand-write
+the config file. Use `ujust openclaw-onboard-local` only when model auth,
+channel setup, pairing, plugins, or other guided onboarding choices are desired.
+The gateway service uses `/usr/bin/bluefin-openclaw-run`, which sources Homebrew
+and `fnm` before executing `openclaw`. This avoids depending on an interactive
+shell PATH inside systemd. Run OpenClaw doctor with
+`OPENCLAW_SERVICE_REPAIR_POLICY=external` so it reports service health without
+rewriting the image-managed systemd user service.
+
+OpenClaw login means opening the gateway Control UI. Use `ujust
+openclaw-dashboard` from the agent user. If the browser asks for a shared
+secret, retrieve the current token with:
+
+```bash
+/usr/bin/bluefin-openclaw-run config get gateway.auth.token
+```
 
 ## npm Lifecycle Scripts
 
@@ -183,10 +212,12 @@ ujust agent-container-create
 ujust agent-container-bootstrap-node
 ujust ramalama-bootstrap
 ujust ramalama-smoke llama3.2
+ujust ramalama-service-enable llama3.2 8080
 ujust ai-node-bootstrap
 ujust openclaw-install
 ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
+ujust openclaw-dashboard
 ```
 
 If OpenClaw requires lifecycle scripts, repeat the install with:
