@@ -63,6 +63,7 @@ periodically compare it with upstream.
   - `ujust ai-node-bootstrap`
   - `ujust openclaw-install`
   - `ujust openclaw-dashboard`
+  - `ujust openclaw-gateway-status`
   - `ujust openclaw-gateway-configure-local`
   - `ujust openclaw-gateway-setup`
   - `ujust openclaw-gateway-enable`
@@ -76,8 +77,8 @@ periodically compare it with upstream.
 - Adds conservative sysctl hardening that does not disable rootless containers.
 - Adds a first-boot system service that creates the configured unprivileged
   agent user, defaulting to `claudex`.
-- Adds a systemd user drop-in expressing the intended OpenClaw gateway bind as
-  loopback-only.
+- Adds an optional systemd user drop-in for the advanced image-managed
+  OpenClaw gateway path, expressing the intended bind as loopback-only.
 - Keeps OpenClaw, Hermes, model files, npm packages, and skills out of the
   immutable OS image.
 
@@ -161,8 +162,59 @@ images as a useful option when ROCm is not the best path.
 
 ## OpenClaw
 
-After the host `fnm` prerequisite and local LLM smoke test pass, install
-OpenClaw as the dedicated agent user:
+OpenClaw is expected to work on Bluefin as normal Linux user software. The
+default path in this repo uses OpenClaw's own onboarding and daemon management
+instead of recreating its config and systemd setup.
+
+### Option A: Recommended OpenClaw-Managed Setup
+
+Use this unless you have a specific reason to own the gateway service yourself.
+Run it as the dedicated agent user after `fnm` is available and the local model
+runtime has been smoke-tested:
+
+```bash
+ujust ai-node-bootstrap
+ujust openclaw-install
+ujust openclaw-onboard-local
+ujust openclaw-gateway-status
+ujust openclaw-dashboard
+ss -ltnp | grep 18789
+```
+
+`ujust openclaw-onboard-local` runs OpenClaw's supported local onboarding flow
+with daemon installation. The wizard configures the gateway, workspace, model
+auth, channels, skills, and the per-user service. This keeps the long-term
+maintenance burden with OpenClaw upstream. The recipe passes OpenClaw's
+supported wrapper setting so the daemon starts through
+`/usr/bin/bluefin-openclaw-run` and can find Homebrew, `fnm`, and the npm global
+OpenClaw install.
+
+If OpenClaw requires npm lifecycle scripts to install correctly, use the
+reviewed exception form and then rerun onboarding:
+
+```bash
+ujust openclaw-install latest true
+ujust openclaw-onboard-local
+```
+
+Login means opening the Control UI:
+
+```bash
+ujust openclaw-dashboard
+```
+
+If the browser asks for a shared secret, retrieve the current token:
+
+```bash
+/usr/bin/bluefin-openclaw-run config get gateway.auth.token
+```
+
+### Option B: Advanced Image-Managed Gateway
+
+Use this only if you deliberately want this image to own the systemd user unit
+and loopback bind instead of OpenClaw's daemon installer. It lowers accidental
+network exposure, but this repo then has to track OpenClaw service and config
+changes over time.
 
 ```bash
 ujust ai-node-bootstrap
@@ -170,64 +222,23 @@ ujust openclaw-install
 ujust openclaw-gateway-configure-local
 ujust openclaw-gateway-enable
 OPENCLAW_SERVICE_REPAIR_POLICY=external /usr/bin/bluefin-openclaw-run doctor
+ujust openclaw-dashboard
 ss -ltnp | grep 18789
 ```
 
-OpenClaw login for this install means opening the browser Control UI served by
-the local gateway. From the agent user, run:
+For this option, answer no if OpenClaw asks whether to update the gateway
+service config to recommended defaults. The service file belongs to this image.
 
-```bash
-ujust openclaw-dashboard
-```
+### Option C: Container-Only Experimentation
 
-That uses OpenClaw's dashboard command so the current gateway auth can be passed
-to the browser without printing secrets when possible. If the browser still asks
-for a shared secret, use:
-
-```bash
-/usr/bin/bluefin-openclaw-run config get gateway.auth.token
-```
-
-Paste that value into the Control UI auth prompt. The minimal local gateway
-recipe generates a gateway token when neither token nor password auth is already
-configured.
-
-The host gateway path is preferred for the always-on local service because it
-uses user systemd directly. The Distrobox install path remains available for
-CLI experimentation, but it does not install or manage the gateway daemon:
+Use this for CLI experiments or disposable npm work. It does not install or
+manage a host gateway daemon:
 
 ```bash
 ujust agent-container-openclaw-install
+ujust agent-container-enter
+openclaw --version
 ```
-
-If OpenClaw requires npm lifecycle scripts to install correctly, use the
-reviewed exception form:
-
-```bash
-ujust openclaw-install latest true
-```
-
-If the gateway reports that an existing config is missing `gateway.mode`, do
-not start it with `--allow-unconfigured` for normal use. Run
-`ujust openclaw-gateway-configure-local` to repair the required local gateway
-mode through OpenClaw's own config CLI. The recipe creates the default
-`~/.openclaw/workspace` directory, sets `gateway.mode=local`, validates the
-config, and leaves model auth, channels, pairing, plugins, and other onboarding
-choices untouched.
-
-If config validation fails because the file is malformed or clobbered, inspect
-the `doctor` output and use `/usr/bin/bluefin-openclaw-run doctor --fix`
-deliberately before rerunning the configuration recipe.
-
-The image-owned gateway service is managed through `ujust
-openclaw-gateway-enable`, not OpenClaw's own daemon installer. If OpenClaw asks
-whether to update the gateway service config to recommended defaults, answer no
-for this image and rerun doctor with
-`OPENCLAW_SERVICE_REPAIR_POLICY=external`.
-
-`ujust openclaw-gateway-setup` is kept as a compatibility alias for the same
-minimal local gateway configuration. Run `ujust openclaw-onboard-local` only
-when you want OpenClaw's full interactive local setup.
 
 Expected posture:
 
@@ -301,17 +312,14 @@ podman build \
   .
 ```
 
-Additional rationale is in [docs/SECURITY-RESEARCH.md](docs/SECURITY-RESEARCH.md).
+Detailed operational runbooks, readiness checks, and security notes are kept in
+the private companion repository `bluefin-custom-docs`. When both repositories
+are checked out under `~/src`, that material is available locally at
+`~/src/bluefin-custom-docs/docs/`.
+
 The host-level `ujust openclaw-install` is kept as a fallback for OpenClaw
 features that cannot run correctly through an integrated Distrobox. Prefer the
 host gateway for the always-on service and the container path for project work.
-
-The containerization/security tradeoffs are in
-[docs/SECURITY-EVALUATION.md](docs/SECURITY-EVALUATION.md).
-The operational pass/fail checks are in
-[docs/FUNCTIONAL-READINESS.md](docs/FUNCTIONAL-READINESS.md).
-The post-rebase and first-boot runbook is in
-[docs/POST-REBASE-FIRST-BOOT.md](docs/POST-REBASE-FIRST-BOOT.md).
 
 ## Maintaining The DX Layer
 
@@ -381,7 +389,7 @@ Verify after reboot:
 bootc status
 ujust ai-doctor
 clinfo
-systemctl --user --no-pager --full status openclaw-gateway.service
+ujust openclaw-gateway-status
 systemctl --user --no-pager --full status bluefin-ramalama.service
 ss -ltnp | grep -E ':(18789|8080)'
 ```

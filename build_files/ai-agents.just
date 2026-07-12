@@ -42,14 +42,12 @@ ai-doctor:
     if [[ -x /usr/bin/bluefin-openclaw-run ]]; then
       if openclaw_version=$(/usr/bin/bluefin-openclaw-run --version 2>/dev/null); then
         echo "bluefin-openclaw-run ${openclaw_version}"
+        /usr/bin/bluefin-openclaw-run gateway status 2>/dev/null || true
       else
         echo "bluefin-openclaw-run cannot start OpenClaw; run: ujust openclaw-install"
       fi
     else
       echo "bluefin-openclaw-run missing"
-    fi
-    if command -v systemctl >/dev/null 2>&1; then
-      systemctl --user --no-pager is-active openclaw-gateway.service 2>/dev/null || true
     fi
 
     echo
@@ -233,6 +231,8 @@ openclaw-gateway-enable:
     set -euo pipefail
 
     bluefin-agent-user require
+    echo "Advanced path: enabling the image-managed OpenClaw gateway service."
+    echo "For the lower-maintenance default, use: ujust openclaw-onboard-local"
     ujust openclaw-gateway-configure-local
 
     systemctl --user daemon-reload
@@ -246,6 +246,8 @@ openclaw-gateway-configure-local:
     set -euo pipefail
 
     bluefin-agent-user require
+    echo "Advanced path: configuring OpenClaw for the image-managed gateway service."
+    echo "For the lower-maintenance default, use: ujust openclaw-onboard-local"
     if ! /usr/bin/bluefin-openclaw-run --version >/dev/null 2>&1; then
       ujust openclaw-install
     fi
@@ -281,17 +283,21 @@ openclaw-dashboard:
     set -euo pipefail
 
     bluefin-agent-user require
-    if ! systemctl --user is-active --quiet openclaw-gateway.service; then
-      ujust openclaw-gateway-enable
-    fi
     /usr/bin/bluefin-openclaw-run dashboard
+
+openclaw-gateway-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    /usr/bin/bluefin-openclaw-run gateway status
 
 openclaw-gateway-setup:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    echo "openclaw-gateway-setup is a compatibility alias for openclaw-gateway-configure-local."
-    ujust openclaw-gateway-configure-local
+    echo "openclaw-gateway-setup is a compatibility alias for the recommended onboarding path."
+    ujust openclaw-onboard-local
 
 openclaw-onboard-local:
     #!/usr/bin/env bash
@@ -302,11 +308,8 @@ openclaw-onboard-local:
       ujust openclaw-install
     fi
 
-    /usr/bin/bluefin-openclaw-run onboard --mode local
-    systemctl --user daemon-reload
-    systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
-    systemctl --user enable --now openclaw-gateway.service
-    ss -ltnp 2>/dev/null | grep ':18789' || true
+    OPENCLAW_WRAPPER=/usr/bin/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run onboard --mode local --install-daemon
+    /usr/bin/bluefin-openclaw-run gateway status || true
 
 hermes-workspace-create NAME="hermes-workspace":
     #!/usr/bin/env bash
