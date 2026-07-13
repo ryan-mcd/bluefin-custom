@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+bluefin-agent-user require
+
+if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
+  echo "Hermes requires the Ubuntu agent container." >&2
+  echo "Create it with: ujust agent-container-create" >&2
+  exit 1
+fi
+
+exec distrobox enter bluefin-agent-ubuntu -- bash -lc '
+  source /etc/profile.d/bluefin-agent.sh
+  if [[ ! -x "$HOME/.local/bin/hermes" ]]; then
+    echo "Hermes Agent is not installed. Run: ujust hermes-install <40-character-commit>" >&2
+    exit 1
+  fi
+  exec "$HOME/.local/bin/hermes" "$@"
+' bluefin-hermes "$@"

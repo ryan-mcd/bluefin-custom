@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes Agent Gateway in Bluefin Agent Distrobox
+Documentation=https://hermes-agent.nousresearch.com/docs/user-guide/messaging
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.hermes/.env
+ExecStart=/usr/bin/bluefin-hermes-run gateway run
+KillMode=mixed
+KillSignal=SIGTERM
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

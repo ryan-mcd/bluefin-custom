@@ -4,11 +4,13 @@ set -euo pipefail
 
 container_init() {
   install -Dm0644 /run/host/usr/share/bluefin-agent/npmrc /etc/npmrc
+  ln -sfn /usr/bin/distrobox-host-exec /usr/local/bin/podman
 
   cat >/etc/profile.d/bluefin-agent.sh <<'EOF'
 export NPM_CONFIG_GLOBALCONFIG=/etc/npmrc
 export NPM_CONFIG_IGNORE_SCRIPTS=true
 export NPM_CONFIG_STRICT_SSL=true
+export HERMES_DOCKER_BINARY=podman
 if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
   eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 fi
@@ -37,7 +39,12 @@ EOF
 source /etc/profile.d/bluefin-agent.sh
 exec openclaw "$@"
 EOF
-  chmod 0755 /usr/local/bin/agent-node /usr/local/bin/agent-npm /usr/local/bin/agent-npx /usr/local/bin/agent-openclaw
+  cat >/usr/local/bin/agent-hermes <<'EOF'
+#!/usr/bin/env bash
+source /etc/profile.d/bluefin-agent.sh
+exec "$HOME/.local/bin/hermes" "$@"
+EOF
+  chmod 0755 /usr/local/bin/agent-node /usr/local/bin/agent-npm /usr/local/bin/agent-npx /usr/local/bin/agent-openclaw /usr/local/bin/agent-hermes
 }
 
 install_node() {
@@ -50,8 +57,8 @@ install_node() {
   eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
   brew list fnm >/dev/null 2>&1 || brew install fnm
   eval "$(fnm env --shell bash)"
-  fnm install 24
-  fnm default 24
+  fnm install 22
+  fnm default 22
 
   install -Dm0644 /run/host/usr/share/bluefin-agent/npmrc "$HOME/.npmrc"
   echo "Node: $(node --version)"
