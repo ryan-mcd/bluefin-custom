@@ -9,7 +9,7 @@ load_config() {
   BLUEFIN_AGENT_USER="${BLUEFIN_AGENT_USER:-claudex}"
   BLUEFIN_AGENT_USER_GROUPS="${BLUEFIN_AGENT_USER_GROUPS:-render}"
   BLUEFIN_AGENT_DENY_GROUPS="${BLUEFIN_AGENT_DENY_GROUPS:-wheel sudo docker libvirt incus-admin lxd kvm qemu mock wireshark input}"
-  BLUEFIN_AGENT_ENABLE_LINGER="${BLUEFIN_AGENT_ENABLE_LINGER:-false}"
+  BLUEFIN_AGENT_ENABLE_LINGER="${BLUEFIN_AGENT_ENABLE_LINGER:-true}"
 
   for config in "$DEFAULT_CONFIG" "$OVERRIDE_CONFIG"; do
     if [[ -r "$config" ]]; then
@@ -176,7 +176,7 @@ status_user() {
   echo "agent user: $BLUEFIN_AGENT_USER"
   echo "allowed supplemental groups: ${BLUEFIN_AGENT_USER_GROUPS:-none}"
   echo "denied groups: ${BLUEFIN_AGENT_DENY_GROUPS:-none}"
-  echo "linger requested: ${BLUEFIN_AGENT_ENABLE_LINGER:-false}"
+  echo "linger requested: ${BLUEFIN_AGENT_ENABLE_LINGER:-true}"
   echo
 
   if ! getent passwd "$BLUEFIN_AGENT_USER" >/dev/null 2>&1; then
