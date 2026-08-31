@@ -110,6 +110,70 @@ ai-profile-set PROFILE="disabled" MODEL="" MODEL_PORT="" CONTEXT_LENGTH="" GATEW
     ujust ai-profile-status
     echo "Administrator step: sudo ujust ai-profile-firewall-apply"
 
+ai-model-list:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    command -v ramalama >/dev/null 2>&1 || {
+      echo "RamaLama is missing. Ask an administrator to install it with Homebrew, then run: ujust ramalama-bootstrap" >&2
+      exit 1
+    }
+    ramalama list
+
+ai-model-select MODEL="" CONTEXT_LENGTH="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    command -v ramalama >/dev/null 2>&1 || {
+      echo "RamaLama is missing. Ask an administrator to install it with Homebrew, then run: ujust ramalama-bootstrap" >&2
+      exit 1
+    }
+
+    model="{{ MODEL }}"
+    if [[ -z "$model" ]]; then
+      [[ -t 0 ]] || {
+        echo "Run interactively or supply a model: ujust ai-model-select <model> [context-length]" >&2
+        exit 2
+      }
+      echo "Downloaded RamaLama models:"
+      ramalama list || true
+      echo
+      read -r -p "Model name or registry reference: " model
+    fi
+    if [[ ! "$model" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
+      echo "MODEL contains unsupported characters." >&2
+      exit 2
+    fi
+
+    profile="$(bluefin-ai-profile get PROFILE)"
+    if [[ "$profile" == disabled ]]; then
+      profile=central-agent
+      echo "No AI profile is active; selecting central-agent for local Hermes access."
+    fi
+    model_port="$(bluefin-ai-profile get MODEL_PORT)"
+    context_length="{{ CONTEXT_LENGTH }}"
+    [[ -n "$context_length" ]] || context_length="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
+    gateway_port="$(bluefin-ai-profile get MODEL_GATEWAY_PORT)"
+    access="$(bluefin-ai-profile get MODEL_GATEWAY_ACCESS)"
+    tls="$(bluefin-ai-profile get MODEL_GATEWAY_TLS)"
+    tls_cert="$(bluefin-ai-profile get MODEL_GATEWAY_TLS_CERT)"
+    tls_key="$(bluefin-ai-profile get MODEL_GATEWAY_TLS_KEY)"
+    gateway_image="$(bluefin-ai-profile get MODEL_GATEWAY_IMAGE)"
+
+    ujust ai-profile-set \
+      "$profile" \
+      "$model" \
+      "$model_port" \
+      "$context_length" \
+      "$gateway_port" \
+      "$access" \
+      "$tls" \
+      "$tls_cert" \
+      "$tls_key" \
+      "$gateway_image"
+
 ai-profile-model-gateway-configure:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -597,6 +661,12 @@ hermes-setup:
     set -euo pipefail
 
     bluefin-hermes-run setup
+
+hermes-chat:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-hermes-run
 
 hermes-model:
     #!/usr/bin/env bash
