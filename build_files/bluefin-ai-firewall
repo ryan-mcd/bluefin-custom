@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+STATE_FILE=/etc/bluefin-agent/ai-firewall-state
+LAN_SOURCE=192.168.0.0/16
+TAILSCALE_IPV4_SOURCE=100.64.0.0/10
+TAILSCALE_IPV6_SOURCE=fd7a:115c:a1e0::/48
+
+if (( EUID != 0 )); then
+  echo "bluefin-ai-firewall must run as root." >&2
+  exit 1
+fi
+
+if ! systemctl is-active --quiet firewalld; then
+  echo "firewalld is not active; refusing to change AI service exposure." >&2
+  exit 1
+fi
+
+agent_user="$(bluefin-agent-user name)"
+agent_home="$(getent passwd "$agent_user" | cut -d: -f6)"
+profile_file="${agent_home}/.config/bluefin-ai/deployment.conf"
+
+read_setting() {
+  local key="$1"
+  local file="$2"
+  sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+PROFILE=disabled
+MODEL_GATEWAY_PORT=8643
+MODEL_GATEWAY_ACCESS=lan,tailscale
+if [[ -r "$profile_file" ]]; then
+  PROFILE="$(read_setting PROFILE "$profile_file")"
+  MODEL_GATEWAY_PORT="$(read_setting MODEL_GATEWAY_PORT "$profile_file")"
+  MODEL_GATEWAY_ACCESS="$(read_setting MODEL_GATEWAY_ACCESS "$profile_file")"
+fi
+
+case "$PROFILE" in
+  central-agent|remote-agents|hybrid|disabled) ;;
+  *) echo "Invalid profile in $profile_file: $PROFILE" >&2; exit 2 ;;
+esac
+if [[ ! "$MODEL_GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( MODEL_GATEWAY_PORT < 1 || MODEL_GATEWAY_PORT > 65535 )); then
+  echo "Invalid model gateway port in $profile_file." >&2
+  exit 2
+fi
+case "$MODEL_GATEWAY_ACCESS" in
+  lan|tailscale|lan,tailscale|tailscale,lan) ;;
+  *) echo "Invalid model gateway access in $profile_file." >&2; exit 2 ;;
+esac
+
+previous_gateway_port=8643
+if [[ -r "$STATE_FILE" ]]; then
+  candidate="$(read_setting MODEL_GATEWAY_PORT "$STATE_FILE")"
+  if [[ "$candidate" =~ ^[0-9]+$ ]] && (( candidate >= 1 && candidate <= 65535 )); then
+    previous_gateway_port="$candidate"
+  fi
+fi
+
+all_sources=("$LAN_SOURCE" "$TAILSCALE_IPV4_SOURCE" "$TAILSCALE_IPV6_SOURCE")
+all_ports=(8642 9119 8643 "$MODEL_GATEWAY_PORT" "$previous_gateway_port")
+mapfile -t all_zones < <(firewall-cmd --get-zones | tr ' ' '\n' | sed '/^$/d')
+
+remove_managed_rules() {
+  local zone source family port rule
+  for zone in "${all_zones[@]}"; do
+    for source in "${all_sources[@]}"; do
+      family=ipv4
+      [[ "$source" == *:* ]] && family=ipv6
+      for port in "${all_ports[@]}"; do
+        rule="rule family=${family} source address=${source} port port=${port} protocol=tcp accept"
+        if firewall-cmd --permanent --zone="$zone" --query-rich-rule="$rule" >/dev/null; then
+          firewall-cmd --permanent --zone="$zone" --remove-rich-rule="$rule" >/dev/null
+        fi
+      done
+    done
+  done
+}
+
+apply_profile_rules() {
+  local desired_ports=()
+  local desired_sources=()
+  local zone source family port rule
+
+  case "$PROFILE" in
+    central-agent) desired_ports=(8642 9119) ;;
+    remote-agents) desired_ports=("$MODEL_GATEWAY_PORT") ;;
+    hybrid) desired_ports=(8642 9119 "$MODEL_GATEWAY_PORT") ;;
+    disabled) return ;;
+  esac
+  [[ "$MODEL_GATEWAY_ACCESS" == *lan* ]] && desired_sources+=("$LAN_SOURCE")
+  if [[ "$MODEL_GATEWAY_ACCESS" == *tailscale* ]]; then
+    desired_sources+=("$TAILSCALE_IPV4_SOURCE" "$TAILSCALE_IPV6_SOURCE")
+  fi
+
+  mapfile -t active_zones < <({ firewall-cmd --get-default-zone; firewall-cmd --get-active-zones | awk '/^[^[:space:]]/{print $1}'; } | sort -u)
+  for zone in "${active_zones[@]}"; do
+    for source in "${desired_sources[@]}"; do
+      family=ipv4
+      [[ "$source" == *:* ]] && family=ipv6
+      for port in "${desired_ports[@]}"; do
+        rule="rule family=${family} source address=${source} port port=${port} protocol=tcp accept"
+        firewall-cmd --permanent --zone="$zone" --query-rich-rule="$rule" >/dev/null || \
+          firewall-cmd --permanent --zone="$zone" --add-rich-rule="$rule" >/dev/null
+      done
+    done
+  done
+}
+
+case "${1:-}" in
+  apply)
+    remove_managed_rules
+    apply_profile_rules
+    install -d -m 0755 /etc/bluefin-agent
+    printf 'MODEL_GATEWAY_PORT=%s\n' "$MODEL_GATEWAY_PORT" >"$STATE_FILE"
+    chmod 0600 "$STATE_FILE"
+    firewall-cmd --reload >/dev/null
+    echo "Applied firewall policy for AI profile: $PROFILE"
+    ;;
+  disable)
+    remove_managed_rules
+    rm -f "$STATE_FILE"
+    firewall-cmd --reload >/dev/null
+    echo "Removed managed AI service firewall rules."
+    ;;
+  status)
+    echo "AI profile: $PROFILE"
+    echo "Configured access: $MODEL_GATEWAY_ACCESS"
+    firewall-cmd --list-all-zones | grep -E "8642|9119|${MODEL_GATEWAY_PORT}|192.168.0.0/16|100.64.0.0/10|fd7a:115c:a1e0::/48" || true
+    ;;
+  *) echo "Usage: bluefin-ai-firewall [apply|disable|status]" >&2; exit 2 ;;
+esac

@@ -43,6 +43,7 @@ done
 
 install -Dm0644 /ctx/npmrc /etc/npmrc
 install -Dm0644 /ctx/npmrc /usr/share/bluefin-agent/npmrc
+install -Dm0644 /ctx/deployment.conf /usr/share/bluefin-agent/deployment.conf
 install -d /etc/bluefin-agent /usr/share/bluefin-agent
 cat >/usr/share/bluefin-agent/agent-user.conf <<EOF
 BLUEFIN_AGENT_USER="$BLUEFIN_AGENT_USER"
@@ -62,11 +63,15 @@ install -Dm0644 /ctx/agent-ubuntu.ini /usr/share/bluefin-agent/distrobox/agent-u
 install -Dm0755 /ctx/bluefin-agent-ubuntu-setup /usr/bin/bluefin-agent-ubuntu-setup
 install -Dm0755 /ctx/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run
 install -Dm0755 /ctx/bluefin-hermes-run /usr/bin/bluefin-hermes-run
+install -Dm0755 /ctx/bluefin-ai-profile /usr/bin/bluefin-ai-profile
+install -Dm0755 /ctx/bluefin-ai-firewall /usr/bin/bluefin-ai-firewall
+install -Dm0755 /ctx/bluefin-model-gateway /usr/bin/bluefin-model-gateway
 install -Dm0755 /ctx/bluefin-agent-user /usr/bin/bluefin-agent-user
 install -Dm0644 /ctx/bluefin-agent-user.service /usr/lib/systemd/system/bluefin-agent-user.service
 install -Dm0644 /ctx/openclaw-gateway.service /etc/systemd/user/openclaw-gateway.service
 install -Dm0644 /ctx/hermes-gateway.service /etc/systemd/user/bluefin-hermes-gateway.service
-install -Dm0644 /ctx/hermes-dashboard.service /etc/systemd/user/bluefin-hermes-dashboard.service
+install -Dm0644 /ctx/hermes-serve.service /etc/systemd/user/bluefin-hermes-serve.service
+install -Dm0644 /ctx/bluefin-model-gateway.service /etc/systemd/user/bluefin-model-gateway.service
 install -Dm0644 /ctx/sysctl-ai-agent.conf /etc/sysctl.d/90-ai-agent-workstation.conf
 install -Dm0644 /ctx/openclaw-gateway-localhost.conf /etc/systemd/user/openclaw-gateway.service.d/10-localhost-defaults.conf
 
@@ -74,11 +79,15 @@ test -x /usr/bin/bluefin-agent-user
 test -x /usr/bin/bluefin-agent-ubuntu-setup
 test -x /usr/bin/bluefin-openclaw-run
 test -x /usr/bin/bluefin-hermes-run
+test -x /usr/bin/bluefin-ai-profile
+test -x /usr/bin/bluefin-ai-firewall
+test -x /usr/bin/bluefin-model-gateway
 test -f /usr/share/ublue-os/just/60-custom.just
 test -f /etc/systemd/user/bluefin-hermes-gateway.service
-test -f /etc/systemd/user/bluefin-hermes-dashboard.service
+test -f /etc/systemd/user/bluefin-hermes-serve.service
+test -f /etc/systemd/user/bluefin-model-gateway.service
 ujust_recipes="$(/usr/bin/just --justfile /usr/share/ublue-os/justfile --list)"
-for recipe in ai-doctor hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
+for recipe in ai-doctor ai-profile-set ai-profile-status hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
   if [[ "$ujust_recipes" != *"$recipe"* ]]; then
     echo "Custom ujust recipe $recipe is not visible in /usr/share/ublue-os/justfile" >&2
     echo "$ujust_recipes" >&2

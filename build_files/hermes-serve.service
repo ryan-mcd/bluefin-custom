@@ -1,13 +1,13 @@
 [Unit]
-Description=Hermes Agent Dashboard in Bluefin Agent Distrobox
-Documentation=https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard
+Description=Hermes Agent remote backend in Bluefin Agent Distrobox
+Documentation=https://hermes-agent.nousresearch.com/docs/user-guide/desktop
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 EnvironmentFile=-%h/.hermes/.env
-ExecStart=/usr/bin/bluefin-hermes-run dashboard --host 0.0.0.0 --port 9119 --no-open
+ExecStart=/usr/bin/bluefin-hermes-run serve --host 0.0.0.0 --port 9119
 KillMode=mixed
 KillSignal=SIGTERM
 Restart=on-failure

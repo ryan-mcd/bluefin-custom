@@ -60,7 +60,238 @@ ai-doctor:
 
     echo
     echo "== listening ports =="
-    ss -ltnp 2>/dev/null | grep -E '(:8642|:9119|:18789|:8080|:12434)' || true
+    ss -ltnp 2>/dev/null | grep -E '(:8642|:8643|:9119|:18789|:8080|:12434)' || true
+
+ai-profile-set PROFILE="disabled" MODEL="" MODEL_PORT="" CONTEXT_LENGTH="" GATEWAY_PORT="" ACCESS="" TLS="" TLS_CERT="" TLS_KEY="" GATEWAY_IMAGE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    requested_profile="{{ PROFILE }}"
+    if [[ "$requested_profile" == central-agent || "$requested_profile" == hybrid ]]; then
+      bluefin-hermes-run --version >/dev/null || {
+        echo "Install and set up Hermes before selecting $requested_profile." >&2
+        exit 1
+      }
+    fi
+    bluefin-ai-profile set \
+      "{{ PROFILE }}" \
+      "{{ MODEL }}" \
+      "{{ MODEL_PORT }}" \
+      "{{ CONTEXT_LENGTH }}" \
+      "{{ GATEWAY_PORT }}" \
+      "{{ ACCESS }}" \
+      "{{ TLS }}" \
+      "{{ TLS_CERT }}" \
+      "{{ TLS_KEY }}" \
+      "{{ GATEWAY_IMAGE }}"
+
+    profile="$(bluefin-ai-profile get PROFILE)"
+    if [[ "$profile" == disabled ]]; then
+      bluefin-ai-profile apply
+      echo "Administrator step: sudo ujust ai-profile-firewall-apply"
+      exit 0
+    fi
+
+    model="$(bluefin-ai-profile get MODEL)"
+    model_port="$(bluefin-ai-profile get MODEL_PORT)"
+    context_length="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
+    ujust ramalama-service-enable "$model" "$model_port" bluefin-ramalama "$context_length"
+
+    if [[ "$profile" == remote-agents || "$profile" == hybrid ]]; then
+      ujust ai-profile-model-gateway-configure
+    fi
+    if [[ "$profile" == central-agent || "$profile" == hybrid ]]; then
+      ujust hermes-local-configure "$model" "$model_port" "$context_length"
+      ujust hermes-lan-configure
+    fi
+
+    bluefin-ai-profile apply
+    ujust ai-profile-status
+    echo "Administrator step: sudo ujust ai-profile-firewall-apply"
+
+ai-profile-model-gateway-configure:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    gateway_port="$(bluefin-ai-profile get MODEL_GATEWAY_PORT)"
+    model_port="$(bluefin-ai-profile get MODEL_PORT)"
+    tls_mode="$(bluefin-ai-profile get MODEL_GATEWAY_TLS)"
+    tls_cert="$(bluefin-ai-profile get MODEL_GATEWAY_TLS_CERT)"
+    tls_key="$(bluefin-ai-profile get MODEL_GATEWAY_TLS_KEY)"
+    gateway_image="$(bluefin-ai-profile get MODEL_GATEWAY_IMAGE)"
+    access="$(bluefin-ai-profile get MODEL_GATEWAY_ACCESS)"
+
+    config_dir="${HOME}/.config/bluefin-ai/model-gateway"
+    env_file="${config_dir}/gateway.env"
+    mkdir -p "$config_dir"
+    chmod 0700 "$config_dir"
+    if ! grep -Eq '^MODEL_GATEWAY_API_KEY=[0-9a-f]{64}$' "$env_file" 2>/dev/null; then
+      printf 'MODEL_GATEWAY_API_KEY=%s\n' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" >"$env_file"
+    fi
+    chmod 0600 "$env_file"
+
+    if [[ "$tls_mode" == files ]]; then
+      install -m 0600 "$tls_cert" "${config_dir}/tls.crt"
+      install -m 0600 "$tls_key" "${config_dir}/tls.key"
+    else
+      rm -f "${config_dir}/tls.crt" "${config_dir}/tls.key"
+      if [[ "$access" == *lan* ]]; then
+        echo "Warning: LAN model traffic uses bearer authentication without TLS."
+        echo "Use TLS=files with a trusted certificate to protect prompts and credentials on the LAN."
+      fi
+    fi
+
+    api_key="$(sed -n 's/^MODEL_GATEWAY_API_KEY=//p' "$env_file")"
+    [[ "$api_key" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "Invalid model gateway API key." >&2
+      exit 1
+    }
+
+    listen_options=""
+    tls_configuration=""
+    if [[ "$tls_mode" == files ]]; then
+      listen_options=" ssl"
+      tls_configuration="
+            ssl_certificate /etc/bluefin-ai/tls.crt;
+            ssl_certificate_key /etc/bluefin-ai/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_tickets off;"
+    fi
+
+    cat >"${config_dir}/nginx.conf" <<EOF
+    worker_processes auto;
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr warn;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        access_log /dev/stdout;
+        server_tokens off;
+        client_body_temp_path /tmp/client_body;
+        proxy_temp_path /tmp/proxy;
+        fastcgi_temp_path /tmp/fastcgi;
+        uwsgi_temp_path /tmp/uwsgi;
+        scgi_temp_path /tmp/scgi;
+
+        map \$http_authorization \$model_gateway_authorized {
+            default 0;
+            "Bearer ${api_key}" 1;
+        }
+
+        limit_req_zone \$binary_remote_addr zone=model_gateway_requests:1m rate=120r/m;
+        limit_conn_zone \$binary_remote_addr zone=model_gateway_client_connections:1m;
+        limit_conn_zone \$server_addr zone=model_gateway_connections:1m;
+
+        server {
+            listen 0.0.0.0:${gateway_port}${listen_options};${tls_configuration}
+            client_max_body_size 16m;
+            limit_req_status 429;
+            limit_conn_status 429;
+
+            location ^~ /v1/ {
+                if (\$model_gateway_authorized = 0) {
+                    return 401;
+                }
+
+                limit_req zone=model_gateway_requests burst=20 nodelay;
+                limit_conn model_gateway_client_connections 8;
+                limit_conn model_gateway_connections 32;
+
+                proxy_pass http://127.0.0.1:${model_port};
+                proxy_http_version 1.1;
+                proxy_set_header Host \$host;
+                proxy_set_header Authorization "";
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_request_buffering off;
+                proxy_read_timeout 1h;
+                proxy_send_timeout 1h;
+            }
+
+            location / {
+                return 404;
+            }
+        }
+    }
+    EOF
+    chmod 0600 "${config_dir}/nginx.conf"
+    rm -f "${config_dir}/Caddyfile"
+    podman run --rm --network none \
+      --read-only \
+      --cap-drop all \
+      --security-opt no-new-privileges \
+      --tmpfs /tmp:rw,nodev,nosuid,noexec,size=32m \
+      --volume "${config_dir}:/etc/bluefin-ai:ro,Z" \
+      --entrypoint /usr/sbin/nginx \
+      "$gateway_image" \
+      -t -c /etc/bluefin-ai/nginx.conf
+
+ai-profile-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    bluefin-ai-profile apply
+
+ai-profile-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    bluefin-ai-profile status
+    profile="$(bluefin-ai-profile get PROFILE)"
+    if [[ "$profile" == remote-agents || "$profile" == hybrid ]]; then
+      gateway_port="$(bluefin-ai-profile get MODEL_GATEWAY_PORT)"
+      tls_mode="$(bluefin-ai-profile get MODEL_GATEWAY_TLS)"
+      scheme=http
+      curl_tls=()
+      if [[ "$tls_mode" == files ]]; then
+        scheme=https
+        curl_tls=(-k)
+      fi
+      status="$(curl "${curl_tls[@]}" --retry 10 --retry-connrefused --retry-delay 1 -sS -o /dev/null -w '%{http_code}' "${scheme}://127.0.0.1:${gateway_port}/v1/models" || true)"
+      [[ "$status" == 401 ]] || {
+        echo "Model gateway failed closed-auth check; expected HTTP 401, received ${status:-no response}." >&2
+        exit 1
+      }
+      api_key="$(sed -n 's/^MODEL_GATEWAY_API_KEY=//p' "${HOME}/.config/bluefin-ai/model-gateway/gateway.env")"
+      curl "${curl_tls[@]}" --retry 10 --retry-connrefused --retry-delay 1 -fsS -H "Authorization: Bearer ${api_key}" "${scheme}://127.0.0.1:${gateway_port}/v1/models" | jq .
+    fi
+
+ai-profile-model-key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    env_file="${HOME}/.config/bluefin-ai/model-gateway/gateway.env"
+    [[ -r "$env_file" ]] || { echo "Model gateway credentials have not been generated." >&2; exit 1; }
+    sed -n 's/^MODEL_GATEWAY_API_KEY=//p' "$env_file"
+
+ai-profile-firewall-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    (( EUID == 0 )) || { echo "Run: sudo ujust ai-profile-firewall-apply" >&2; exit 1; }
+    bluefin-ai-firewall apply
+
+ai-profile-firewall-disable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    (( EUID == 0 )) || { echo "Run: sudo ujust ai-profile-firewall-disable" >&2; exit 1; }
+    bluefin-ai-firewall disable
+
+ai-profile-firewall-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    (( EUID == 0 )) || { echo "Run: sudo ujust ai-profile-firewall-status" >&2; exit 1; }
+    bluefin-ai-firewall status
 
 agent-user-status:
     #!/usr/bin/env bash
@@ -433,7 +664,7 @@ hermes-gateway-disable:
     bluefin-agent-user require
     systemctl --user disable --now bluefin-hermes-gateway.service
 
-hermes-dashboard-install:
+hermes-serve-install:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -446,10 +677,17 @@ hermes-dashboard-install:
       elif [[ -x "$HOME/.local/bin/uv" ]]; then
         "$HOME/.local/bin/uv" pip install -e ".[web,pty]"
       else
-        echo "Hermes uv is missing; reinstall Hermes before enabling the dashboard." >&2
+        echo "Hermes uv is missing; reinstall Hermes before enabling the remote backend." >&2
         exit 1
       fi
     '
+
+hermes-dashboard-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "hermes-dashboard-install is a compatibility alias for hermes-serve-install."
+    ujust hermes-serve-install
 
 hermes-lan-configure USERNAME="hermes":
     #!/usr/bin/env bash
@@ -494,7 +732,7 @@ hermes-lan-configure USERNAME="hermes":
     ensure_secret HERMES_DASHBOARD_BASIC_AUTH_SECRET
     bluefin-hermes-run config set terminal.backend docker
     bluefin-hermes-run config check
-    ujust hermes-dashboard-install
+    ujust hermes-serve-install
     echo "Hermes LAN credentials are stored with mode 0600 in ${env_file}."
 
 hermes-lan-firewall-enable:
@@ -561,9 +799,9 @@ hermes-lan-enable USERNAME="hermes":
     bluefin-agent-user require
     ujust hermes-lan-configure "{{ USERNAME }}"
     systemctl --user daemon-reload
-    systemctl --user reset-failed bluefin-hermes-gateway.service bluefin-hermes-dashboard.service 2>/dev/null || true
-    systemctl --user enable --now bluefin-hermes-gateway.service bluefin-hermes-dashboard.service
-    echo "Hermes dashboard: http://$(hostname -I | awk '{print $1}'):9119"
+    systemctl --user reset-failed bluefin-hermes-gateway.service bluefin-hermes-serve.service 2>/dev/null || true
+    systemctl --user enable --now bluefin-hermes-gateway.service bluefin-hermes-serve.service
+    echo "Hermes remote backend: http://$(hostname -I | awk '{print $1}'):9119"
     echo "Hermes API:       http://$(hostname -I | awk '{print $1}'):8642/v1"
     echo "Allowed sources:  192.168.0.0/16, 100.64.0.0/10, fd7a:115c:a1e0::/48"
     echo "Administrator step: sudo ujust hermes-lan-firewall-enable"
@@ -573,7 +811,7 @@ hermes-lan-status:
     set -euo pipefail
 
     bluefin-agent-user require
-    systemctl --user --no-pager --full status bluefin-hermes-gateway.service bluefin-hermes-dashboard.service || true
+    systemctl --user --no-pager --full status bluefin-hermes-gateway.service bluefin-hermes-serve.service || true
     ss -ltnp 2>/dev/null | grep -E ':(8642|9119)' || true
 
 hermes-lan-disable:
@@ -581,7 +819,7 @@ hermes-lan-disable:
     set -euo pipefail
 
     bluefin-agent-user require
-    systemctl --user disable --now bluefin-hermes-dashboard.service
+    systemctl --user disable --now bluefin-hermes-serve.service bluefin-hermes-dashboard.service 2>/dev/null || true
     env_file="${HOME}/.hermes/.env"
     if [[ -f "$env_file" ]]; then
       temporary="$(mktemp "${env_file}.XXXXXX")"
@@ -639,7 +877,7 @@ hermes-uninstall:
     set -euo pipefail
 
     bluefin-agent-user require
-    systemctl --user disable --now bluefin-hermes-gateway.service bluefin-hermes-dashboard.service 2>/dev/null || true
+    systemctl --user disable --now bluefin-hermes-gateway.service bluefin-hermes-serve.service bluefin-hermes-dashboard.service 2>/dev/null || true
     bluefin-hermes-run uninstall
 
 hermes-workspace-create NAME="hermes-workspace":
@@ -652,12 +890,13 @@ hermes-workspace-create NAME="hermes-workspace":
     echo "  ujust agent-container-enter"
     echo "  cd ~/src/{{ NAME }}"
 
-ramalama-serve MODEL="llama3.2" PORT="8080":
+ramalama-serve MODEL="llama3.2" PORT="8080" CONTEXT_LENGTH="64000":
     #!/usr/bin/env bash
     set -euo pipefail
 
     model="{{ MODEL }}"
     port="{{ PORT }}"
+    context_length="{{ CONTEXT_LENGTH }}"
 
     bluefin-agent-user require
     if command -v brew >/dev/null 2>&1; then
@@ -671,15 +910,16 @@ ramalama-serve MODEL="llama3.2" PORT="8080":
     fi
 
     echo "Serving ${model} on port ${port}. Check firewall exposure before using this on untrusted networks."
-    ramalama serve --host 127.0.0.1 --port "${port}" "${model}"
+    ramalama serve --host 127.0.0.1 --port "${port}" --ctx-size "${context_length}" --webui off "${model}"
 
-ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama":
+ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama" CONTEXT_LENGTH="64000":
     #!/usr/bin/env bash
     set -euo pipefail
 
     model="{{ MODEL }}"
     port="{{ PORT }}"
     name="{{ NAME }}"
+    context_length="{{ CONTEXT_LENGTH }}"
 
     bluefin-agent-user require
     if command -v brew >/dev/null 2>&1; then
@@ -693,7 +933,7 @@ ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama":
     fi
 
     mkdir -p "${HOME}/.config/containers/systemd"
-    ramalama serve --host 127.0.0.1 --port "${port}" --webui off --name "${name}" --generate="quadlet:${HOME}/.config/containers/systemd" "${model}"
+    ramalama serve --host 127.0.0.1 --port "${port}" --ctx-size "${context_length}" --webui off --name "${name}" --generate="quadlet:${HOME}/.config/containers/systemd" "${model}"
     systemctl --user daemon-reload
     systemctl --user enable "${name}.service"
     systemctl --user restart "${name}.service"

@@ -69,6 +69,9 @@ jobs:
           bash -n build_files/bluefin-agent-ubuntu-setup
           bash -n build_files/bluefin-openclaw-run
           bash -n build_files/bluefin-hermes-run
+          bash -n build_files/bluefin-ai-profile
+          bash -n build_files/bluefin-ai-firewall
+          bash -n build_files/bluefin-model-gateway
           bash -n build_files/bluefin-dx-groups
 
       - name: Get current date

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+bluefin-agent-user require
+
+config_dir="${HOME}/.config/bluefin-ai/model-gateway"
+deployment_config="${HOME}/.config/bluefin-ai/deployment.conf"
+environment_file="${config_dir}/gateway.env"
+nginx_config="${config_dir}/nginx.conf"
+
+[[ -r "$deployment_config" ]] || { echo "Missing deployment profile. Run: ujust ai-profile-set ..." >&2; exit 1; }
+[[ -r "$environment_file" ]] || { echo "Missing model gateway secret. Reapply the selected AI profile." >&2; exit 1; }
+[[ -r "$nginx_config" ]] || { echo "Missing model gateway configuration. Reapply the selected AI profile." >&2; exit 1; }
+
+api_key="$(sed -n 's/^MODEL_GATEWAY_API_KEY=//p' "$environment_file")"
+[[ "$api_key" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid model gateway secret. Reapply the selected AI profile." >&2; exit 1; }
+configured_key=false
+while IFS= read -r line; do
+  if [[ "$line" == *"\"Bearer ${api_key}\" 1;"* ]]; then
+    configured_key=true
+    break
+  fi
+done <"$nginx_config"
+[[ "$configured_key" == true ]] || { echo "Model gateway secret and nginx configuration differ. Reapply the selected AI profile." >&2; exit 1; }
+
+source "$deployment_config"
+if [[ "${MODEL_GATEWAY_IMAGE:-}" == docker.io/library/caddy:2.11.4-alpine ]]; then
+  MODEL_GATEWAY_IMAGE=docker.io/library/nginx:1.30.4-alpine
+fi
+case "${MODEL_GATEWAY_IMAGE:-}" in
+  *[!A-Za-z0-9._:/@+-]*|'') echo "Invalid MODEL_GATEWAY_IMAGE." >&2; exit 2 ;;
+esac
+
+exec podman run \
+  --rm \
+  --replace \
+  --name bluefin-model-gateway \
+  --network host \
+  --pull=missing \
+  --read-only \
+  --pids-limit 128 \
+  --cap-drop all \
+  --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,nodev,nosuid,noexec,size=32m \
+  --volume "${config_dir}:/etc/bluefin-ai:ro,Z" \
+  --entrypoint /usr/sbin/nginx \
+  "$MODEL_GATEWAY_IMAGE" \
+  -c /etc/bluefin-ai/nginx.conf -g "daemon off;"

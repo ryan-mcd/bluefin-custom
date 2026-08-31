@@ -1,0 +1,17 @@
+[Unit]
+Description=Authenticated nginx gateway for the Bluefin model API
+Documentation=https://github.com/containers/ramalama
+Documentation=https://nginx.org/en/docs/http/ngx_http_proxy_module.html
+After=network-online.target bluefin-ramalama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bluefin-model-gateway
+ExecStop=-/usr/bin/podman stop --time 10 bluefin-model-gateway
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DEFAULT_CONFIG="/usr/share/bluefin-agent/deployment.conf"
+USER_CONFIG="${HOME}/.config/bluefin-ai/deployment.conf"
+
+load_config() {
+  PROFILE=disabled
+  MODEL=llama3.2
+  MODEL_PORT=8080
+  MODEL_CONTEXT_LENGTH=64000
+  MODEL_GATEWAY_PORT=8643
+  MODEL_GATEWAY_ACCESS=lan,tailscale
+  MODEL_GATEWAY_TLS=off
+  MODEL_GATEWAY_TLS_CERT=
+  MODEL_GATEWAY_TLS_KEY=
+  MODEL_GATEWAY_IMAGE=docker.io/library/nginx:1.30.4-alpine
+
+  [[ -f "$DEFAULT_CONFIG" ]] && source "$DEFAULT_CONFIG"
+  [[ -f "$USER_CONFIG" ]] && source "$USER_CONFIG"
+  if [[ "$MODEL_GATEWAY_IMAGE" == docker.io/library/caddy:2.11.4-alpine ]]; then
+    MODEL_GATEWAY_IMAGE=docker.io/library/nginx:1.30.4-alpine
+  fi
+  validate_config
+}
+
+validate_port() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < 1 || value > 65535 )); then
+    echo "$name must be between 1 and 65535." >&2
+    exit 2
+  fi
+}
+
+validate_config() {
+  case "$PROFILE" in
+    central-agent|remote-agents|hybrid|disabled) ;;
+    *) echo "Unsupported profile: $PROFILE" >&2; exit 2 ;;
+  esac
+  if [[ ! "$MODEL" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
+    echo "MODEL contains unsupported characters." >&2
+    exit 2
+  fi
+  validate_port MODEL_PORT "$MODEL_PORT"
+  validate_port MODEL_GATEWAY_PORT "$MODEL_GATEWAY_PORT"
+  if [[ ! "$MODEL_CONTEXT_LENGTH" =~ ^[0-9]+$ ]] || (( MODEL_CONTEXT_LENGTH < 64000 )); then
+    echo "MODEL_CONTEXT_LENGTH must be at least 64000." >&2
+    exit 2
+  fi
+  case "$MODEL_GATEWAY_ACCESS" in
+    lan|tailscale|lan,tailscale|tailscale,lan) ;;
+    *) echo "MODEL_GATEWAY_ACCESS must be lan, tailscale, or lan,tailscale." >&2; exit 2 ;;
+  esac
+  case "$MODEL_GATEWAY_TLS" in
+    off) ;;
+    files)
+      [[ -n "$MODEL_GATEWAY_TLS_CERT" ]] || {
+        echo "MODEL_GATEWAY_TLS_CERT is required when TLS is files." >&2
+        exit 2
+      }
+      [[ -n "$MODEL_GATEWAY_TLS_KEY" ]] || {
+        echo "MODEL_GATEWAY_TLS_KEY is required when TLS is files." >&2
+        exit 2
+      }
+      ;;
+    *) echo "MODEL_GATEWAY_TLS must be off or files." >&2; exit 2 ;;
+  esac
+  if [[ ! "$MODEL_GATEWAY_IMAGE" =~ ^[A-Za-z0-9._:/@+-]+$ ]]; then
+    echo "MODEL_GATEWAY_IMAGE contains unsupported characters." >&2
+    exit 2
+  fi
+}
+
+write_config() {
+  local temporary
+  mkdir -p "$(dirname "$USER_CONFIG")"
+  temporary="$(mktemp "${USER_CONFIG}.XXXXXX")"
+  {
+    printf 'PROFILE=%q\n' "$PROFILE"
+    printf 'MODEL=%q\n' "$MODEL"
+    printf 'MODEL_PORT=%q\n' "$MODEL_PORT"
+    printf 'MODEL_CONTEXT_LENGTH=%q\n' "$MODEL_CONTEXT_LENGTH"
+    printf 'MODEL_GATEWAY_PORT=%q\n' "$MODEL_GATEWAY_PORT"
+    printf 'MODEL_GATEWAY_ACCESS=%q\n' "$MODEL_GATEWAY_ACCESS"
+    printf 'MODEL_GATEWAY_TLS=%q\n' "$MODEL_GATEWAY_TLS"
+    printf 'MODEL_GATEWAY_TLS_CERT=%q\n' "$MODEL_GATEWAY_TLS_CERT"
+    printf 'MODEL_GATEWAY_TLS_KEY=%q\n' "$MODEL_GATEWAY_TLS_KEY"
+    printf 'MODEL_GATEWAY_IMAGE=%q\n' "$MODEL_GATEWAY_IMAGE"
+  } >"$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$USER_CONFIG"
+}
+
+show_config() {
+  cat <<EOF
+profile:               $PROFILE
+model:                 $MODEL
+model port:            $MODEL_PORT
+model context:         $MODEL_CONTEXT_LENGTH
+model gateway port:    $MODEL_GATEWAY_PORT
+model gateway access:  $MODEL_GATEWAY_ACCESS
+model gateway TLS:     $MODEL_GATEWAY_TLS
+model gateway image:   $MODEL_GATEWAY_IMAGE
+config:                $USER_CONFIG
+EOF
+}
+
+apply_profile() {
+  bluefin-agent-user require
+  systemctl --user daemon-reload
+
+  managed_services=(
+    bluefin-model-gateway.service
+    bluefin-hermes-gateway.service
+    bluefin-hermes-serve.service
+    bluefin-hermes-dashboard.service
+    bluefin-ramalama.service
+  )
+  for service in "${managed_services[@]}"; do
+    systemctl --user disable --now "$service" 2>/dev/null || true
+  done
+  systemctl --user reset-failed "${managed_services[@]}" 2>/dev/null || true
+
+  case "$PROFILE" in
+    central-agent)
+      systemctl --user enable --now bluefin-ramalama.service bluefin-hermes-gateway.service bluefin-hermes-serve.service
+      ;;
+    remote-agents)
+      systemctl --user enable --now bluefin-ramalama.service bluefin-model-gateway.service
+      ;;
+    hybrid)
+      systemctl --user enable --now bluefin-ramalama.service bluefin-model-gateway.service bluefin-hermes-gateway.service bluefin-hermes-serve.service
+      ;;
+    disabled) ;;
+  esac
+}
+
+status_profile() {
+  show_config
+  echo
+  systemctl --user --no-pager --full status \
+    bluefin-ramalama.service \
+    bluefin-model-gateway.service \
+    bluefin-hermes-gateway.service \
+    bluefin-hermes-serve.service 2>/dev/null || true
+  echo
+  ss -ltnp 2>/dev/null | grep -E ":(${MODEL_PORT}|${MODEL_GATEWAY_PORT}|8642|9119)([[:space:]]|$)" || true
+}
+
+load_config
+
+case "${1:-}" in
+  set)
+    PROFILE="${2:-$PROFILE}"
+    MODEL="${3:-$MODEL}"
+    MODEL_PORT="${4:-$MODEL_PORT}"
+    MODEL_CONTEXT_LENGTH="${5:-$MODEL_CONTEXT_LENGTH}"
+    MODEL_GATEWAY_PORT="${6:-$MODEL_GATEWAY_PORT}"
+    MODEL_GATEWAY_ACCESS="${7:-$MODEL_GATEWAY_ACCESS}"
+    MODEL_GATEWAY_TLS="${8:-$MODEL_GATEWAY_TLS}"
+    MODEL_GATEWAY_TLS_CERT="${9:-$MODEL_GATEWAY_TLS_CERT}"
+    MODEL_GATEWAY_TLS_KEY="${10:-$MODEL_GATEWAY_TLS_KEY}"
+    MODEL_GATEWAY_IMAGE="${11:-$MODEL_GATEWAY_IMAGE}"
+    validate_config
+    write_config
+    show_config
+    ;;
+  get)
+    key="${2:-}"
+    case "$key" in
+      PROFILE|MODEL|MODEL_PORT|MODEL_CONTEXT_LENGTH|MODEL_GATEWAY_PORT|MODEL_GATEWAY_ACCESS|MODEL_GATEWAY_TLS|MODEL_GATEWAY_TLS_CERT|MODEL_GATEWAY_TLS_KEY|MODEL_GATEWAY_IMAGE)
+        printf '%s\n' "${!key}"
+        ;;
+      *) echo "Unsupported configuration key: $key" >&2; exit 2 ;;
+    esac
+    ;;
+  show) show_config ;;
+  apply) apply_profile ;;
+  status) status_profile ;;
+  *) echo "Usage: bluefin-ai-profile [set|get|show|apply|status]" >&2; exit 2 ;;
+esac
