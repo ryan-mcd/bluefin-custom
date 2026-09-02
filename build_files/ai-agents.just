@@ -1047,6 +1047,12 @@ ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama" CON
     port="{{ PORT }}"
     name="{{ NAME }}"
     context_length="{{ CONTEXT_LENGTH }}"
+    startup_timeout="${BLUEFIN_RAMALAMA_STARTUP_TIMEOUT:-900}"
+
+    if [[ ! "$startup_timeout" =~ ^[0-9]+$ ]] || (( startup_timeout < 30 )); then
+      echo "BLUEFIN_RAMALAMA_STARTUP_TIMEOUT must be an integer of at least 30 seconds." >&2
+      exit 2
+    fi
 
     bluefin-agent-user require
     if command -v brew >/dev/null 2>&1; then
@@ -1063,6 +1069,27 @@ ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama" CON
     ramalama serve --host 127.0.0.1 --port "${port}" --ctx-size "${context_length}" --webui off --name "${name}" --generate="quadlet:${HOME}/.config/containers/systemd" "${model}"
     systemctl --user daemon-reload
     systemctl --user restart "${name}.service"
+    echo "Waiting up to ${startup_timeout} seconds for ${name} to answer /v1/models..."
+    ready=false
+    deadline=$((SECONDS + startup_timeout))
+    while (( SECONDS < deadline )); do
+      if curl --connect-timeout 2 --max-time 10 -fsS "http://127.0.0.1:${port}/v1/models" >/dev/null 2>&1; then
+        ready=true
+        break
+      fi
+      if systemctl --user is-failed --quiet "${name}.service"; then
+        echo "${name}.service failed while loading the model." >&2
+        journalctl --user -u "${name}.service" -n 100 --no-pager >&2 || true
+        exit 1
+      fi
+      sleep 5
+    done
+    if [[ "$ready" != true ]]; then
+      echo "${name} did not become ready within ${startup_timeout} seconds." >&2
+      journalctl --user -u "${name}.service" -n 100 --no-pager >&2 || true
+      exit 1
+    fi
+    echo "${name} is ready."
     systemctl --user --no-pager --full status "${name}.service" || true
     ss -ltnp 2>/dev/null | grep ":${port}" || true
 
