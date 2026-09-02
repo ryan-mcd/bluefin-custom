@@ -111,27 +111,35 @@ apply_profile() {
   bluefin-agent-user require
   systemctl --user daemon-reload
 
-  managed_services=(
+  regular_services=(
     bluefin-model-gateway.service
     bluefin-hermes-gateway.service
     bluefin-hermes-serve.service
     bluefin-hermes-dashboard.service
-    bluefin-ramalama.service
   )
-  for service in "${managed_services[@]}"; do
+  for service in "${regular_services[@]}"; do
     systemctl --user disable --now "$service" 2>/dev/null || true
   done
-  systemctl --user reset-failed "${managed_services[@]}" 2>/dev/null || true
+  systemctl --user stop bluefin-ramalama.service 2>/dev/null || true
+  systemctl --user reset-failed "${regular_services[@]}" bluefin-ramalama.service 2>/dev/null || true
+
+  if [[ "$PROFILE" == disabled ]]; then
+    rm -f "${HOME}/.config/containers/systemd/bluefin-ramalama.container"
+    systemctl --user daemon-reload
+  fi
 
   case "$PROFILE" in
     central-agent)
-      systemctl --user enable --now bluefin-ramalama.service bluefin-hermes-gateway.service bluefin-hermes-serve.service
+      systemctl --user start bluefin-ramalama.service
+      systemctl --user enable --now bluefin-hermes-gateway.service bluefin-hermes-serve.service
       ;;
     remote-agents)
-      systemctl --user enable --now bluefin-ramalama.service bluefin-model-gateway.service
+      systemctl --user start bluefin-ramalama.service
+      systemctl --user enable --now bluefin-model-gateway.service
       ;;
     hybrid)
-      systemctl --user enable --now bluefin-ramalama.service bluefin-model-gateway.service bluefin-hermes-gateway.service bluefin-hermes-serve.service
+      systemctl --user start bluefin-ramalama.service
+      systemctl --user enable --now bluefin-model-gateway.service bluefin-hermes-gateway.service bluefin-hermes-serve.service
       ;;
     disabled) ;;
   esac

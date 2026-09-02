@@ -53,7 +53,7 @@ ai-doctor:
     echo
     echo "== Hermes Agent container wrapper =="
     if [[ -x /usr/bin/bluefin-hermes-run ]]; then
-      /usr/bin/bluefin-hermes-run --version 2>/dev/null || echo "Hermes is not installed; run: ujust hermes-install <40-character-commit>"
+      /usr/bin/bluefin-hermes-run --version 2>/dev/null || echo "Hermes is not installed; run: ujust hermes-install"
     else
       echo "bluefin-hermes-run missing"
     fi
@@ -614,20 +614,51 @@ openclaw-onboard-local:
     OPENCLAW_WRAPPER=/usr/bin/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run onboard --mode local --install-daemon
     /usr/bin/bluefin-openclaw-run gateway status || true
 
-hermes-install COMMIT INSTALLER_SHA256="":
+hermes-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    release_file=/usr/share/bluefin-agent/hermes-release.conf
+    [[ -r "$release_file" ]] || {
+      echo "The image does not contain Hermes release metadata." >&2
+      exit 1
+    }
+    source "$release_file"
+    printf 'release tag:       %s\n' "$HERMES_RELEASE_TAG"
+    printf 'release commit:    %s\n' "$HERMES_RELEASE_COMMIT"
+    printf 'installer SHA-256: %s\n' "$HERMES_INSTALLER_SHA256"
+
+hermes-install REF="" INSTALLER_SHA256="":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    commit="{{ COMMIT }}"
+    release_file=/usr/share/bluefin-agent/hermes-release.conf
+    [[ -r "$release_file" ]] || {
+      echo "The image does not contain Hermes release metadata." >&2
+      exit 1
+    }
+    source "$release_file"
+
+    ref="{{ REF }}"
     expected_sha256="{{ INSTALLER_SHA256 }}"
-    if [[ ! "$commit" =~ ^[0-9a-fA-F]{40}$ ]]; then
-      echo "COMMIT must be a full 40-character Hermes Agent Git commit." >&2
+    if [[ -z "$ref" ]]; then
+      ref="$HERMES_RELEASE_TAG"
+    fi
+    if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ && ! "$ref" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
+      echo "REF must be a Hermes release tag beginning with v or a full 40-character Git commit." >&2
       exit 2
     fi
     if [[ -n "$expected_sha256" && ! "$expected_sha256" =~ ^[0-9a-fA-F]{64}$ ]]; then
       echo "INSTALLER_SHA256 must be empty or a 64-character SHA-256 digest." >&2
       exit 2
+    fi
+    required_commit=""
+    if [[ "$ref" == "$HERMES_RELEASE_TAG" || "${ref,,}" == "$HERMES_RELEASE_COMMIT" ]]; then
+      required_commit="$HERMES_RELEASE_COMMIT"
+    fi
+    if [[ -z "$expected_sha256" && -n "$required_commit" ]]; then
+      expected_sha256="$HERMES_INSTALLER_SHA256"
     fi
     if ! distrobox list 2>/dev/null | grep -q 'bluefin-agent-ubuntu'; then
       ujust agent-container-create
@@ -635,12 +666,34 @@ hermes-install COMMIT INSTALLER_SHA256="":
 
     distrobox enter bluefin-agent-ubuntu -- bash -lc '
       set -euo pipefail
-      commit="$1"
+      ref="$1"
       expected_sha256="$2"
+      required_commit="$3"
+      if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        commit="${ref,,}"
+        release_tag=""
+      else
+        release_tag="$ref"
+        commit="$(git ls-remote --exit-code https://github.com/NousResearch/hermes-agent.git "refs/tags/${release_tag}^{}" 2>/dev/null | awk '\''NR == 1 {print $1}'\'' || true)"
+        if [[ -z "$commit" ]]; then
+          commit="$(git ls-remote --exit-code https://github.com/NousResearch/hermes-agent.git "refs/tags/${release_tag}" 2>/dev/null | awk '\''NR == 1 {print $1}'\'' || true)"
+        fi
+        [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+          echo "Unable to resolve Hermes release tag: ${release_tag}" >&2
+          exit 1
+        }
+      fi
+      if [[ -n "$required_commit" && "$commit" != "$required_commit" ]]; then
+        echo "Hermes release tag no longer resolves to the image-pinned commit." >&2
+        echo "Expected: ${required_commit}" >&2
+        echo "Resolved: ${commit}" >&2
+        exit 1
+      fi
       installer="$(mktemp)"
       trap '\''rm -f "$installer"'\'' EXIT
       curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/${commit}/scripts/install.sh" -o "$installer"
       actual_sha256="$(sha256sum "$installer" | awk '\''{print $1}'\'')"
+      [[ -z "$release_tag" ]] || echo "Hermes release tag: ${release_tag}"
       echo "Hermes installer commit: ${commit}"
       echo "Hermes installer SHA-256: ${actual_sha256}"
       if [[ -n "$expected_sha256" && "${actual_sha256,,}" != "${expected_sha256,,}" ]]; then
@@ -652,9 +705,13 @@ hermes-install COMMIT INSTALLER_SHA256="":
         exit 1
       fi
       echo "Enabling npm lifecycle scripts only for the reviewed Hermes installer."
-      NPM_CONFIG_IGNORE_SCRIPTS=false bash "$installer" --skip-setup --commit "$commit"
+      installer_args=(--skip-setup --commit "$commit")
+      if grep -q -- "--force-commit" "$installer"; then
+        installer_args+=(--force-commit)
+      fi
+      NPM_CONFIG_IGNORE_SCRIPTS=false bash "$installer" "${installer_args[@]}"
       "$HOME/.local/bin/hermes" --version
-    ' bluefin-hermes-install "$commit" "$expected_sha256"
+    ' bluefin-hermes-install "$ref" "$expected_sha256" "$required_commit"
 
 hermes-setup:
     #!/usr/bin/env bash
@@ -693,13 +750,13 @@ hermes-doctor:
     bluefin-hermes-run doctor
     bluefin-hermes-run status --deep
 
-hermes-update COMMIT INSTALLER_SHA256="":
+hermes-update REF="" INSTALLER_SHA256="":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
     bluefin-hermes-run backup
-    ujust hermes-install "{{ COMMIT }}" "{{ INSTALLER_SHA256 }}"
+    ujust hermes-install "{{ REF }}" "{{ INSTALLER_SHA256 }}"
     ujust hermes-doctor
 
 hermes-gateway-setup:
@@ -1005,7 +1062,6 @@ ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama" CON
     mkdir -p "${HOME}/.config/containers/systemd"
     ramalama serve --host 127.0.0.1 --port "${port}" --ctx-size "${context_length}" --webui off --name "${name}" --generate="quadlet:${HOME}/.config/containers/systemd" "${model}"
     systemctl --user daemon-reload
-    systemctl --user enable "${name}.service"
     systemctl --user restart "${name}.service"
     systemctl --user --no-pager --full status "${name}.service" || true
     ss -ltnp 2>/dev/null | grep ":${port}" || true
@@ -1022,7 +1078,9 @@ ramalama-service-disable NAME="bluefin-ramalama":
     elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
       eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
     fi
-    systemctl --user disable --now "${name}.service" || true
+    systemctl --user stop "${name}.service" || true
+    rm -f "${HOME}/.config/containers/systemd/${name}.container"
+    systemctl --user daemon-reload
     if command -v ramalama >/dev/null 2>&1; then
       ramalama stop "${name}" || true
     fi

@@ -13,7 +13,7 @@ fi
 exec distrobox enter bluefin-agent-ubuntu -- bash -lc '
   source /etc/profile.d/bluefin-agent.sh
   if [[ ! -x "$HOME/.local/bin/hermes" ]]; then
-    echo "Hermes Agent is not installed. Run: ujust hermes-install <40-character-commit>" >&2
+    echo "Hermes Agent is not installed. Run: ujust hermes-install" >&2
     exit 1
   fi
   exec "$HOME/.local/bin/hermes" "$@"

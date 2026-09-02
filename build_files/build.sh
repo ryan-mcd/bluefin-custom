@@ -44,6 +44,20 @@ done
 install -Dm0644 /ctx/npmrc /etc/npmrc
 install -Dm0644 /ctx/npmrc /usr/share/bluefin-agent/npmrc
 install -Dm0644 /ctx/deployment.conf /usr/share/bluefin-agent/deployment.conf
+source /ctx/hermes-release.conf
+if [[ ! "$HERMES_RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
+  echo "Invalid HERMES_RELEASE_TAG: $HERMES_RELEASE_TAG" >&2
+  exit 1
+fi
+if [[ ! "$HERMES_RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Invalid HERMES_RELEASE_COMMIT: $HERMES_RELEASE_COMMIT" >&2
+  exit 1
+fi
+if [[ ! "$HERMES_INSTALLER_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Invalid HERMES_INSTALLER_SHA256: $HERMES_INSTALLER_SHA256" >&2
+  exit 1
+fi
+install -Dm0644 /ctx/hermes-release.conf /usr/share/bluefin-agent/hermes-release.conf
 install -d /etc/bluefin-agent /usr/share/bluefin-agent
 cat >/usr/share/bluefin-agent/agent-user.conf <<EOF
 BLUEFIN_AGENT_USER="$BLUEFIN_AGENT_USER"
@@ -83,11 +97,12 @@ test -x /usr/bin/bluefin-ai-profile
 test -x /usr/bin/bluefin-ai-firewall
 test -x /usr/bin/bluefin-model-gateway
 test -f /usr/share/ublue-os/just/60-custom.just
+test -f /usr/share/bluefin-agent/hermes-release.conf
 test -f /etc/systemd/user/bluefin-hermes-gateway.service
 test -f /etc/systemd/user/bluefin-hermes-serve.service
 test -f /etc/systemd/user/bluefin-model-gateway.service
 ujust_recipes="$(/usr/bin/just --justfile /usr/share/ublue-os/justfile --list)"
-for recipe in ai-doctor ai-profile-set ai-profile-status hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
+for recipe in ai-doctor ai-profile-set ai-profile-status hermes-release hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
   if [[ "$ujust_recipes" != *"$recipe"* ]]; then
     echo "Custom ujust recipe $recipe is not visible in /usr/share/ublue-os/justfile" >&2
     echo "$ujust_recipes" >&2
