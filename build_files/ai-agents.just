@@ -149,8 +149,8 @@ ai-model-select MODEL="" CONTEXT_LENGTH="":
 
     profile="$(bluefin-ai-profile get PROFILE)"
     if [[ "$profile" == disabled ]]; then
-      profile=central-agent
-      echo "No AI profile is active; selecting central-agent for local Hermes access."
+      profile=model-only
+      echo "No AI profile is active; selecting model-only for loopback RamaLama access."
     fi
     model_port="$(bluefin-ai-profile get MODEL_PORT)"
     context_length="{{ CONTEXT_LENGTH }}"
@@ -162,7 +162,8 @@ ai-model-select MODEL="" CONTEXT_LENGTH="":
     tls_key="$(bluefin-ai-profile get MODEL_GATEWAY_TLS_KEY)"
     gateway_image="$(bluefin-ai-profile get MODEL_GATEWAY_IMAGE)"
 
-    ujust ai-profile-set \
+    ujust ramalama-service-enable "$model" "$model_port" bluefin-ramalama "$context_length"
+    bluefin-ai-profile set \
       "$profile" \
       "$model" \
       "$model_port" \
@@ -173,6 +174,31 @@ ai-model-select MODEL="" CONTEXT_LENGTH="":
       "$tls_cert" \
       "$tls_key" \
       "$gateway_image"
+    echo "RamaLama model endpoint: http://127.0.0.1:${model_port}/v1"
+    echo "Hermes was not installed, configured, or restarted."
+    if [[ "$profile" == central-agent || "$profile" == hybrid ]]; then
+      echo "To point the existing local Hermes installation at this model, run: ujust ai-hermes-use-selected-model"
+    elif [[ "$profile" == model-only ]]; then
+      echo "To publish authenticated inference later, run: ujust ai-profile-set remote-agents"
+      echo "To add local Hermes later, install Hermes and run: ujust ai-profile-set central-agent"
+    fi
+
+ai-hermes-use-selected-model:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    bluefin-hermes-run --version >/dev/null || {
+      echo "Hermes is not installed; model serving through RamaLama is unaffected." >&2
+      echo "Install Hermes first with: ujust hermes-install" >&2
+      exit 1
+    }
+    model="$(bluefin-ai-profile get MODEL)"
+    model_port="$(bluefin-ai-profile get MODEL_PORT)"
+    context_length="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
+    ujust hermes-local-configure "$model" "$model_port" "$context_length"
+    systemctl --user try-restart bluefin-hermes-gateway.service bluefin-hermes-serve.service 2>/dev/null || true
+    echo "Hermes now uses the selected RamaLama model."
 
 ai-profile-model-gateway-configure:
     #!/usr/bin/env bash

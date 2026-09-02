@@ -37,7 +37,7 @@ if [[ -r "$profile_file" ]]; then
 fi
 
 case "$PROFILE" in
-  central-agent|remote-agents|hybrid|disabled) ;;
+  model-only|central-agent|remote-agents|hybrid|disabled) ;;
   *) echo "Invalid profile in $profile_file: $PROFILE" >&2; exit 2 ;;
 esac
 if [[ ! "$MODEL_GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( MODEL_GATEWAY_PORT < 1 || MODEL_GATEWAY_PORT > 65535 )); then
@@ -83,6 +83,7 @@ apply_profile_rules() {
   local zone source family port rule
 
   case "$PROFILE" in
+    model-only) return ;;
     central-agent) desired_ports=(8642 9119) ;;
     remote-agents) desired_ports=("$MODEL_GATEWAY_PORT") ;;
     hybrid) desired_ports=(8642 9119 "$MODEL_GATEWAY_PORT") ;;

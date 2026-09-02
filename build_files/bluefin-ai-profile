@@ -36,7 +36,7 @@ validate_port() {
 
 validate_config() {
   case "$PROFILE" in
-    central-agent|remote-agents|hybrid|disabled) ;;
+    model-only|central-agent|remote-agents|hybrid|disabled) ;;
     *) echo "Unsupported profile: $PROFILE" >&2; exit 2 ;;
   esac
   if [[ ! "$MODEL" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
@@ -45,8 +45,12 @@ validate_config() {
   fi
   validate_port MODEL_PORT "$MODEL_PORT"
   validate_port MODEL_GATEWAY_PORT "$MODEL_GATEWAY_PORT"
-  if [[ ! "$MODEL_CONTEXT_LENGTH" =~ ^[0-9]+$ ]] || (( MODEL_CONTEXT_LENGTH < 64000 )); then
-    echo "MODEL_CONTEXT_LENGTH must be at least 64000." >&2
+  if [[ ! "$MODEL_CONTEXT_LENGTH" =~ ^[0-9]+$ ]] || (( MODEL_CONTEXT_LENGTH < 1 )); then
+    echo "MODEL_CONTEXT_LENGTH must be a positive integer." >&2
+    exit 2
+  fi
+  if [[ "$PROFILE" == central-agent || "$PROFILE" == remote-agents || "$PROFILE" == hybrid ]] && (( MODEL_CONTEXT_LENGTH < 64000 )); then
+    echo "MODEL_CONTEXT_LENGTH must be at least 64000 for agent profiles." >&2
     exit 2
   fi
   case "$MODEL_GATEWAY_ACCESS" in
@@ -129,6 +133,9 @@ apply_profile() {
   fi
 
   case "$PROFILE" in
+    model-only)
+      systemctl --user start bluefin-ramalama.service
+      ;;
     central-agent)
       systemctl --user start bluefin-ramalama.service
       systemctl --user enable --now bluefin-hermes-gateway.service bluefin-hermes-serve.service
