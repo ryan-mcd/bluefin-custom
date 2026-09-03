@@ -1093,6 +1093,7 @@ ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama" CON
 
     mkdir -p "${HOME}/.config/containers/systemd"
     ramalama serve --host 127.0.0.1 --port "${port}" --ctx-size "${context_length}" --webui off --name "${name}" --generate="quadlet:${HOME}/.config/containers/systemd" "${model}"
+    bluefin-ramalama-quadlet-fix "${HOME}/.config/containers/systemd/${name}.container"
     systemctl --user daemon-reload
     systemctl --user restart "${name}.service"
     echo "Waiting up to ${startup_timeout} seconds for ${name} to answer /v1/models..."

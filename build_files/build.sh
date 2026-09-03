@@ -80,6 +80,7 @@ install -Dm0755 /ctx/bluefin-hermes-run /usr/bin/bluefin-hermes-run
 install -Dm0755 /ctx/bluefin-ai-profile /usr/bin/bluefin-ai-profile
 install -Dm0755 /ctx/bluefin-ai-firewall /usr/bin/bluefin-ai-firewall
 install -Dm0755 /ctx/bluefin-model-gateway /usr/bin/bluefin-model-gateway
+install -Dm0755 /ctx/bluefin-ramalama-quadlet-fix /usr/bin/bluefin-ramalama-quadlet-fix
 install -Dm0755 /ctx/bluefin-agent-user /usr/bin/bluefin-agent-user
 install -Dm0644 /ctx/bluefin-agent-user.service /usr/lib/systemd/system/bluefin-agent-user.service
 install -Dm0644 /ctx/openclaw-gateway.service /etc/systemd/user/openclaw-gateway.service
@@ -96,6 +97,7 @@ test -x /usr/bin/bluefin-hermes-run
 test -x /usr/bin/bluefin-ai-profile
 test -x /usr/bin/bluefin-ai-firewall
 test -x /usr/bin/bluefin-model-gateway
+test -x /usr/bin/bluefin-ramalama-quadlet-fix
 test -f /usr/share/ublue-os/just/60-custom.just
 test -f /usr/share/bluefin-agent/hermes-release.conf
 test -f /etc/systemd/user/bluefin-hermes-gateway.service

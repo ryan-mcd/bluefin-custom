@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+quadlet_file="${1:-}"
+if [[ -z "$quadlet_file" || ! -f "$quadlet_file" ]]; then
+  echo "Usage: bluefin-ramalama-quadlet-fix <quadlet.container>" >&2
+  exit 2
+fi
+
+command -v jq >/dev/null 2>&1 || {
+  echo "jq is required to validate RamaLama split-model mounts." >&2
+  exit 1
+}
+
+mapfile -t first_shard_mounts < <(
+  grep -E '^Mount=type=bind,src=[^,]+,(target|destination)=/mnt/models/.+-00001-of-[0-9]{5}\.gguf,' "$quadlet_file" || true
+)
+if (( ${#first_shard_mounts[@]} == 0 )); then
+  exit 0
+fi
+
+mount_additions="$(mktemp "${quadlet_file}.mounts.XXXXXX")"
+patched_quadlet="$(mktemp "${quadlet_file}.patched.XXXXXX")"
+trap 'rm -f "$mount_additions" "$patched_quadlet"' EXIT
+
+added=0
+for first_mount in "${first_shard_mounts[@]}"; do
+  source_path="${first_mount#*src=}"
+  source_path="${source_path%%,*}"
+  if [[ "$first_mount" == *,target=* ]]; then
+    target_path="${first_mount#*,target=}"
+  else
+    target_path="${first_mount#*,destination=}"
+  fi
+  target_path="${target_path%%,*}"
+
+  if [[ ! "$target_path" =~ ^/mnt/models/(.*)-00001-of-([0-9]{5})\.gguf$ ]]; then
+    continue
+  fi
+  shard_prefix="${BASH_REMATCH[1]}"
+  shard_count_text="${BASH_REMATCH[2]}"
+  shard_count=$((10#$shard_count_text))
+  if [[ "$shard_prefix" == /* || "$shard_prefix" == .. || "$shard_prefix" == ../* || "$shard_prefix" == */../* || "$shard_prefix" == */.. || "$shard_prefix" == *,* ]]; then
+    echo "Refusing unsafe split model path: ${shard_prefix}" >&2
+    exit 1
+  fi
+  model_root="$(dirname "$(dirname "$source_path")")"
+  refs_dir="${model_root}/refs"
+  first_name="${shard_prefix}-00001-of-${shard_count_text}.gguf"
+  ref_file=""
+
+  if [[ -d "$refs_dir" ]]; then
+    while IFS= read -r -d '' candidate; do
+      if jq -e --arg name "$first_name" 'any(.files[]?; .name == $name)' "$candidate" >/dev/null 2>&1; then
+        ref_file="$candidate"
+        break
+      fi
+    done < <(find "$refs_dir" -maxdepth 1 -type f -name '*.json' -print0)
+  fi
+
+  if [[ -z "$ref_file" ]]; then
+    echo "Unable to find RamaLama metadata for split model shard ${first_name}." >&2
+    exit 1
+  fi
+
+  for (( shard_number = 2; shard_number <= shard_count; shard_number++ )); do
+    printf -v shard_number_text '%05d' "$shard_number"
+    shard_name="${shard_prefix}-${shard_number_text}-of-${shard_count_text}.gguf"
+    shard_target="/mnt/models/${shard_name}"
+    if grep -Fq ",target=${shard_target}," "$quadlet_file" || grep -Fq ",destination=${shard_target}," "$quadlet_file"; then
+      continue
+    fi
+
+    shard_hash="$(jq -r --arg name "$shard_name" '.files[]? | select(.name == $name) | .hash' "$ref_file" | head -n 1)"
+    if [[ -z "$shard_hash" || "$shard_hash" == null ]]; then
+      echo "RamaLama metadata is missing split model shard ${shard_name}." >&2
+      exit 1
+    fi
+    if [[ ! "$shard_hash" =~ ^sha256[:-][0-9a-f]{64}$ ]]; then
+      echo "RamaLama metadata has an invalid hash for split model shard ${shard_name}." >&2
+      exit 1
+    fi
+    shard_blob="${model_root}/blobs/${shard_hash/:/-}"
+    if [[ ! -f "$shard_blob" ]]; then
+      echo "RamaLama did not download split model shard ${shard_name}." >&2
+      exit 1
+    fi
+
+    printf 'Mount=type=bind,src=%s,target=%s,ro,Z\n' "$shard_blob" "$shard_target" >>"$mount_additions"
+    added=$((added + 1))
+  done
+done
+
+if (( added == 0 )); then
+  exit 0
+fi
+
+awk 'FNR == NR { mounts = mounts $0 ORS; next } /^\[Install\]$/ { printf "%s", mounts } { print }' \
+  "$mount_additions" "$quadlet_file" >"$patched_quadlet"
+chmod --reference="$quadlet_file" "$patched_quadlet"
+mv -f "$patched_quadlet" "$quadlet_file"
+echo "Added ${added} missing split-GGUF mount(s) to ${quadlet_file}."
