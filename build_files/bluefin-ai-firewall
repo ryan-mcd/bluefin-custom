@@ -45,6 +45,8 @@ if [[ ! "$MODEL_GATEWAY_PORT" =~ ^[0-9]+$ ]] || (( MODEL_GATEWAY_PORT < 1 || MOD
   exit 2
 fi
 case "$MODEL_GATEWAY_ACCESS" in
+  'lan\,tailscale') MODEL_GATEWAY_ACCESS=lan,tailscale ;;
+  'tailscale\,lan') MODEL_GATEWAY_ACCESS=tailscale,lan ;;
   lan|tailscale|lan,tailscale|tailscale,lan) ;;
   *) echo "Invalid model gateway access in $profile_file." >&2; exit 2 ;;
 esac

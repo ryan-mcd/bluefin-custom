@@ -824,15 +824,26 @@ hermes-serve-install:
     bluefin-agent-user require
     distrobox enter bluefin-agent-ubuntu -- bash -lc '
       set -euo pipefail
-      cd "$HOME/.hermes/hermes-agent"
-      if command -v uv >/dev/null 2>&1; then
-        uv pip install -e ".[web,pty]"
-      elif [[ -x "$HOME/.local/bin/uv" ]]; then
-        "$HOME/.local/bin/uv" pip install -e ".[web,pty]"
-      else
-        echo "Hermes uv is missing; reinstall Hermes before enabling the remote backend." >&2
+      hermes_dir="$HOME/.hermes/hermes-agent"
+      hermes_python="$hermes_dir/venv/bin/python"
+      if [[ ! -x "$hermes_python" ]]; then
+        echo "Hermes Python environment is missing: $hermes_python" >&2
+        echo "Run: ujust hermes-install" >&2
         exit 1
       fi
+      if [[ -x "$HOME/.hermes/bin/uv" ]]; then
+        uv_binary="$HOME/.hermes/bin/uv"
+      elif command -v uv >/dev/null 2>&1; then
+        uv_binary="$(command -v uv)"
+      elif [[ -x "$HOME/.local/bin/uv" ]]; then
+        uv_binary="$HOME/.local/bin/uv"
+      else
+        echo "uv was not found at $HOME/.hermes/bin/uv, on PATH, or at $HOME/.local/bin/uv." >&2
+        echo "Run: ujust hermes-install" >&2
+        exit 1
+      fi
+      cd "$hermes_dir"
+      "$uv_binary" pip install --python "$hermes_python" -e ".[web,pty]"
     '
 
 hermes-dashboard-install:
@@ -852,6 +863,8 @@ hermes-lan-configure USERNAME="hermes":
       echo "USERNAME contains unsupported characters." >&2
       exit 2
     fi
+
+    ujust hermes-serve-install
 
     env_file="${HOME}/.hermes/.env"
     mkdir -p "$(dirname "$env_file")"
@@ -885,7 +898,6 @@ hermes-lan-configure USERNAME="hermes":
     ensure_secret HERMES_DASHBOARD_BASIC_AUTH_SECRET
     bluefin-hermes-run config set terminal.backend docker
     bluefin-hermes-run config check
-    ujust hermes-serve-install
     echo "Hermes LAN credentials are stored with mode 0600 in ${env_file}."
 
 hermes-lan-firewall-enable:
@@ -984,6 +996,35 @@ hermes-lan-disable:
     systemctl --user try-restart bluefin-hermes-gateway.service
     echo "Administrator cleanup: sudo ujust hermes-lan-firewall-disable"
 
+hermes-sandbox-pull:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    bluefin-agent-user require
+    distrobox enter bluefin-agent-ubuntu -- bash -lc '
+      set -euo pipefail
+      source /etc/profile.d/bluefin-agent.sh
+      cd "$HOME/.hermes/hermes-agent"
+      image="$(./venv/bin/python -c "
+    from hermes_cli.config import get_env_value, load_config
+    terminal = load_config().get(\"terminal\", {})
+    print(get_env_value(\"TERMINAL_DOCKER_IMAGE\") or terminal.get(\"docker_image\") or \"nikolaik/python-nodejs:python3.11-nodejs20\")
+      ")"
+      if [[ "$image" == nikolaik/python-nodejs:* ]]; then
+        image="docker.io/$image"
+      fi
+      if [[ -z "$image" || "$image" == -* || "$image" == *[[:space:]]* ]]; then
+        echo "Invalid Hermes terminal image reference." >&2
+        exit 2
+      fi
+      echo "Preparing Hermes terminal sandbox image: $image"
+      if ! podman pull --policy=missing "$image"; then
+        echo "Hermes sandbox image download failed; resolve the Podman error above, then retry: ujust hermes-sandbox-pull" >&2
+        exit 1
+      fi
+      echo "Hermes sandbox image is cached in the agent account host Podman storage."
+    '
+
 hermes-local-configure MODEL PORT="8080" CONTEXT_LENGTH="64000":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1005,6 +1046,7 @@ hermes-local-configure MODEL PORT="8080" CONTEXT_LENGTH="64000":
       exit 2
     fi
     endpoint="http://127.0.0.1:${port}/v1"
+    ujust hermes-sandbox-pull
     curl -fsS "${endpoint}/models" | jq .
     bluefin-hermes-run config set model.provider custom
     bluefin-hermes-run config set model.default "$model"
@@ -1018,6 +1060,7 @@ hermes-local-smoke:
     set -euo pipefail
 
     bluefin-agent-user require
+    ujust hermes-sandbox-pull
     response="$(bluefin-hermes-run chat --quiet --toolsets terminal -q 'Use the terminal tool exactly once to run printf bluefin-hermes-ok, then reply with only that output.')"
     printf '%s\n' "$response"
     grep -Fq 'bluefin-hermes-ok' <<<"$response" || {
