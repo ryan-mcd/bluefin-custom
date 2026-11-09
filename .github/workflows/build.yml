@@ -58,7 +58,10 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y just
+          sudo apt-get install -y shellcheck python3-venv
+          python3 -m venv /tmp/bluefin-sast
+          /tmp/bluefin-sast/bin/pip install rust-just==1.59.0 bandit==1.8.6
+          echo "/tmp/bluefin-sast/bin" >> "$GITHUB_PATH"
 
       - name: Static validation
         run: |
@@ -73,6 +76,18 @@ jobs:
           bash -n build_files/bluefin-ai-firewall
           bash -n build_files/bluefin-model-gateway
           bash -n build_files/bluefin-dx-groups
+
+      - name: Security checks
+        run: |
+          shellcheck --severity=warning --exclude=SC1090,SC1091 \
+            build_files/build.sh build_files/dx-layer.sh \
+            build_files/bluefin-agent-user build_files/bluefin-agent-ubuntu-setup \
+            build_files/bluefin-openclaw-run build_files/bluefin-hermes-run \
+            build_files/bluefin-ai-profile build_files/bluefin-ai-firewall \
+            build_files/bluefin-model-gateway build_files/bluefin-dx-groups \
+            build_files/bluefin-ramalama-quadlet-fix
+          /tmp/bluefin-sast/bin/bandit -ll build_files/bluefin-ai-dashboard
+          python3 -B -m unittest discover -s tests -v
 
       - name: Get current date
         id: date
@@ -196,11 +211,12 @@ jobs:
       - name: Sign container image
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
-          IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
-          for tag in ${{ steps.metadata.outputs.tags }}; do
-            cosign sign -y --key env://COSIGN_PRIVATE_KEY $IMAGE_FULL:$tag
+          IMAGE_FULL="${IMAGE_REGISTRY}/${IMAGE_NAME}"
+          read -r -a tags <<< "$TAGS"
+          for tag in "${tags[@]}"; do
+            cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_FULL}:${tag}"
           done
         env:
-          TAGS: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.metadata.outputs.tags }}
           COSIGN_EXPERIMENTAL: false
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}

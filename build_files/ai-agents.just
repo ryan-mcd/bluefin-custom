@@ -1,3 +1,10 @@
+# Run the dashboard in the dedicated agent user's session.
+ai-dashboard:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bluefin-agent-user require
+    exec bluefin-ai-dashboard
+
 ai-doctor:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -62,12 +69,12 @@ ai-doctor:
     echo "== listening ports =="
     ss -ltnp 2>/dev/null | grep -E '(:8642|:8643|:9119|:18789|:8080|:12434)' || true
 
-ai-profile-set PROFILE="disabled" MODEL="" MODEL_PORT="" CONTEXT_LENGTH="" GATEWAY_PORT="" ACCESS="" TLS="" TLS_CERT="" TLS_KEY="" GATEWAY_IMAGE="":
+ai-profile-set $PROFILE="disabled" $MODEL="" $MODEL_PORT="" $CONTEXT_LENGTH="" $GATEWAY_PORT="" $ACCESS="" $TLS="" $TLS_CERT="" $TLS_KEY="" $GATEWAY_IMAGE="":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    requested_profile="{{ PROFILE }}"
+    requested_profile="${PROFILE}"
     if [[ "$requested_profile" == central-agent || "$requested_profile" == hybrid ]]; then
       bluefin-hermes-run --version >/dev/null || {
         echo "Install and set up Hermes before selecting $requested_profile." >&2
@@ -75,16 +82,16 @@ ai-profile-set PROFILE="disabled" MODEL="" MODEL_PORT="" CONTEXT_LENGTH="" GATEW
       }
     fi
     bluefin-ai-profile set \
-      "{{ PROFILE }}" \
-      "{{ MODEL }}" \
-      "{{ MODEL_PORT }}" \
-      "{{ CONTEXT_LENGTH }}" \
-      "{{ GATEWAY_PORT }}" \
-      "{{ ACCESS }}" \
-      "{{ TLS }}" \
-      "{{ TLS_CERT }}" \
-      "{{ TLS_KEY }}" \
-      "{{ GATEWAY_IMAGE }}"
+      "${PROFILE}" \
+      "${MODEL}" \
+      "${MODEL_PORT}" \
+      "${CONTEXT_LENGTH}" \
+      "${GATEWAY_PORT}" \
+      "${ACCESS}" \
+      "${TLS}" \
+      "${TLS_CERT}" \
+      "${TLS_KEY}" \
+      "${GATEWAY_IMAGE}"
 
     profile="$(bluefin-ai-profile get PROFILE)"
     if [[ "$profile" == disabled ]]; then
@@ -121,7 +128,7 @@ ai-model-list:
     }
     ramalama list
 
-ai-model-select MODEL="" CONTEXT_LENGTH="":
+ai-model-select $MODEL="" $CONTEXT_LENGTH="":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -131,7 +138,7 @@ ai-model-select MODEL="" CONTEXT_LENGTH="":
       exit 1
     }
 
-    model="{{ MODEL }}"
+    model="${MODEL}"
     if [[ -z "$model" ]]; then
       [[ -t 0 ]] || {
         echo "Run interactively or supply a model: ujust ai-model-select <model> [context-length]" >&2
@@ -153,7 +160,7 @@ ai-model-select MODEL="" CONTEXT_LENGTH="":
       echo "No AI profile is active; selecting model-only for loopback RamaLama access."
     fi
     model_port="$(bluefin-ai-profile get MODEL_PORT)"
-    context_length="{{ CONTEXT_LENGTH }}"
+    context_length="${CONTEXT_LENGTH}"
     [[ -n "$context_length" ]] || context_length="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
     gateway_port="$(bluefin-ai-profile get MODEL_GATEWAY_PORT)"
     access="$(bluefin-ai-profile get MODEL_GATEWAY_ACCESS)"
@@ -471,7 +478,7 @@ agent-container-bootstrap-node:
 
     distrobox enter bluefin-agent-ubuntu -- /run/host/usr/bin/bluefin-agent-ubuntu-setup --install-node
 
-agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
+agent-container-openclaw-install $VERSION="latest" $ALLOW_SCRIPTS="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -480,24 +487,24 @@ agent-container-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
       distrobox assemble create --file /usr/share/bluefin-agent/distrobox/agent-ubuntu.ini
     fi
 
-    if [[ "{{ ALLOW_SCRIPTS }}" == "true" ]]; then
+    if [[ "${ALLOW_SCRIPTS}" == "true" ]]; then
       script_flag="--ignore-scripts=false"
       echo "Installing with npm lifecycle scripts enabled for this command."
     else
       script_flag="--ignore-scripts"
     fi
 
-    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; if ! command -v node >/dev/null 2>&1; then /run/host/usr/bin/bluefin-agent-ubuntu-setup --install-node; source /etc/profile.d/bluefin-agent.sh; fi; npm view "openclaw@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global '"${script_flag}"' "openclaw@{{ VERSION }}"; openclaw --version || true'
+    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; if ! command -v node >/dev/null 2>&1; then /run/host/usr/bin/bluefin-agent-ubuntu-setup --install-node; source /etc/profile.d/bluefin-agent.sh; fi; npm view "openclaw@$1" name version dist.integrity dist.tarball --json; npm install --global "$2" "openclaw@$1"; openclaw --version || true' bluefin-openclaw-install "$VERSION" "$script_flag"
 
-agent-container-npm-install-trusted PACKAGE VERSION="latest":
+agent-container-npm-install-trusted $PACKAGE $VERSION="latest":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
     echo "This enables npm lifecycle scripts for one reviewed package install inside the Ubuntu agent container."
-    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; npm view "{{ PACKAGE }}@{{ VERSION }}" name version dist.integrity dist.tarball --json; npm install --global --ignore-scripts=false "{{ PACKAGE }}@{{ VERSION }}"'
+    distrobox enter bluefin-agent-ubuntu -- bash -lc 'source /etc/profile.d/bluefin-agent.sh; npm view "$1@$2" name version dist.integrity dist.tarball --json; npm install --global --ignore-scripts=false "$1@$2"' bluefin-npm-install "$PACKAGE" "$VERSION"
 
-ai-node-bootstrap NODE_VERSION="24":
+ai-node-bootstrap $NODE_VERSION="24":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -514,14 +521,14 @@ ai-node-bootstrap NODE_VERSION="24":
       exit 1
     fi
     eval "$(fnm env --shell bash)"
-    fnm install "{{ NODE_VERSION }}"
-    fnm default "{{ NODE_VERSION }}"
+    fnm install "${NODE_VERSION}"
+    fnm default "${NODE_VERSION}"
 
     echo "Node: $(node --version)"
     echo "npm:  $(npm --version)"
     echo "System npm policy: ignore-scripts=$(npm config get ignore-scripts)"
 
-openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
+openclaw-install $VERSION="latest" $ALLOW_SCRIPTS="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -547,11 +554,11 @@ openclaw-install VERSION="latest" ALLOW_SCRIPTS="false":
     fi
 
     echo "Inspecting package metadata before install:"
-    npm view "openclaw@{{ VERSION }}" name version dist.integrity dist.tarball --json
-    if [[ "{{ ALLOW_SCRIPTS }}" == "true" ]]; then
-      npm install --global --ignore-scripts=false "openclaw@{{ VERSION }}"
+    npm view "openclaw@${VERSION}" name version dist.integrity dist.tarball --json
+    if [[ "${ALLOW_SCRIPTS}" == "true" ]]; then
+      npm install --global --ignore-scripts=false "openclaw@${VERSION}"
     else
-      npm install --global --ignore-scripts "openclaw@{{ VERSION }}"
+      npm install --global --ignore-scripts "openclaw@${VERSION}"
     fi
     openclaw --version || true
 
@@ -654,7 +661,7 @@ hermes-release:
     printf 'release commit:    %s\n' "$HERMES_RELEASE_COMMIT"
     printf 'installer SHA-256: %s\n' "$HERMES_INSTALLER_SHA256"
 
-hermes-install REF="" INSTALLER_SHA256="":
+hermes-install $REF="" $INSTALLER_SHA256="":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -666,8 +673,8 @@ hermes-install REF="" INSTALLER_SHA256="":
     }
     source "$release_file"
 
-    ref="{{ REF }}"
-    expected_sha256="{{ INSTALLER_SHA256 }}"
+    ref="${REF}"
+    expected_sha256="${INSTALLER_SHA256}"
     if [[ -z "$ref" ]]; then
       ref="$HERMES_RELEASE_TAG"
     fi
@@ -776,13 +783,13 @@ hermes-doctor:
     bluefin-hermes-run doctor
     bluefin-hermes-run status --deep
 
-hermes-update REF="" INSTALLER_SHA256="":
+hermes-update $REF="" $INSTALLER_SHA256="":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
     bluefin-hermes-run backup
-    ujust hermes-install "{{ REF }}" "{{ INSTALLER_SHA256 }}"
+    ujust hermes-install "${REF}" "${INSTALLER_SHA256}"
     ujust hermes-doctor
 
 hermes-gateway-setup:
@@ -853,12 +860,12 @@ hermes-dashboard-install:
     echo "hermes-dashboard-install is a compatibility alias for hermes-serve-install."
     ujust hermes-serve-install
 
-hermes-lan-configure USERNAME="hermes":
+hermes-lan-configure $USERNAME="hermes":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    username="{{ USERNAME }}"
+    username="${USERNAME}"
     if [[ ! "$username" =~ ^[A-Za-z0-9._-]+$ ]]; then
       echo "USERNAME contains unsupported characters." >&2
       exit 2
@@ -957,12 +964,12 @@ hermes-lan-firewall-disable:
     done
     firewall-cmd --reload
 
-hermes-lan-enable USERNAME="hermes":
+hermes-lan-enable $USERNAME="hermes":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    ujust hermes-lan-configure "{{ USERNAME }}"
+    ujust hermes-lan-configure "${USERNAME}"
     systemctl --user daemon-reload
     systemctl --user reset-failed bluefin-hermes-gateway.service bluefin-hermes-serve.service 2>/dev/null || true
     systemctl --user enable --now bluefin-hermes-gateway.service bluefin-hermes-serve.service
@@ -1025,14 +1032,14 @@ hermes-sandbox-pull:
       echo "Hermes sandbox image is cached in the agent account host Podman storage."
     '
 
-hermes-local-configure MODEL PORT="8080" CONTEXT_LENGTH="64000":
+hermes-local-configure $MODEL $PORT="8080" $CONTEXT_LENGTH="64000":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    model="{{ MODEL }}"
-    port="{{ PORT }}"
-    context_length="{{ CONTEXT_LENGTH }}"
+    model="${MODEL}"
+    port="${PORT}"
+    context_length="${CONTEXT_LENGTH}"
     if [[ ! "$model" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
       echo "MODEL contains unsupported characters." >&2
       exit 2
@@ -1076,23 +1083,27 @@ hermes-uninstall:
     systemctl --user disable --now bluefin-hermes-gateway.service bluefin-hermes-serve.service bluefin-hermes-dashboard.service 2>/dev/null || true
     bluefin-hermes-run uninstall
 
-hermes-workspace-create NAME="hermes-workspace":
+hermes-workspace-create $NAME="hermes-workspace":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    mkdir -p "${HOME}/src/{{ NAME }}"
-    echo "Created ${HOME}/src/{{ NAME }} for Hermes Agent projects."
+    if [[ ! "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+      echo "NAME must be a simple workspace name." >&2
+      exit 2
+    fi
+    mkdir -p "${HOME}/src/${NAME}"
+    echo "Created ${HOME}/src/${NAME} for Hermes Agent projects."
     echo "  ujust agent-container-enter"
-    echo "  cd ~/src/{{ NAME }}"
+    echo "  cd ~/src/${NAME}"
 
-ramalama-serve MODEL="llama3.2" PORT="8080" CONTEXT_LENGTH="64000":
+ramalama-serve $MODEL="llama3.2" $PORT="8080" $CONTEXT_LENGTH="64000":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    model="{{ MODEL }}"
-    port="{{ PORT }}"
-    context_length="{{ CONTEXT_LENGTH }}"
+    model="${MODEL}"
+    port="${PORT}"
+    context_length="${CONTEXT_LENGTH}"
 
     bluefin-agent-user require
     if command -v brew >/dev/null 2>&1; then
@@ -1108,14 +1119,18 @@ ramalama-serve MODEL="llama3.2" PORT="8080" CONTEXT_LENGTH="64000":
     echo "Serving ${model} on port ${port}. Check firewall exposure before using this on untrusted networks."
     ramalama serve --host 127.0.0.1 --port "${port}" --ctx-size "${context_length}" --webui off "${model}"
 
-ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama" CONTEXT_LENGTH="64000":
+ramalama-service-enable $MODEL="llama3.2" $PORT="8080" $NAME="bluefin-ramalama" $CONTEXT_LENGTH="64000":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    model="{{ MODEL }}"
-    port="{{ PORT }}"
-    name="{{ NAME }}"
-    context_length="{{ CONTEXT_LENGTH }}"
+    model="${MODEL}"
+    port="${PORT}"
+    name="${NAME}"
+    context_length="${CONTEXT_LENGTH}"
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+      echo "NAME must be a simple service name." >&2
+      exit 2
+    fi
     startup_timeout="${BLUEFIN_RAMALAMA_STARTUP_TIMEOUT:-900}"
 
     if [[ ! "$startup_timeout" =~ ^[0-9]+$ ]] || (( startup_timeout < 30 )); then
@@ -1163,11 +1178,15 @@ ramalama-service-enable MODEL="llama3.2" PORT="8080" NAME="bluefin-ramalama" CON
     systemctl --user --no-pager --full status "${name}.service" || true
     ss -ltnp 2>/dev/null | grep ":${port}" || true
 
-ramalama-service-disable NAME="bluefin-ramalama":
+ramalama-service-disable $NAME="bluefin-ramalama":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    name="{{ NAME }}"
+    name="${NAME}"
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+      echo "NAME must be a simple service name." >&2
+      exit 2
+    fi
 
     bluefin-agent-user require
     if command -v brew >/dev/null 2>&1; then
@@ -1199,7 +1218,7 @@ ramalama-bootstrap:
     fi
     ramalama --version
 
-ramalama-smoke MODEL="llama3.2":
+ramalama-smoke $MODEL="llama3.2":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -1211,4 +1230,4 @@ ramalama-smoke MODEL="llama3.2":
     fi
     command -v ramalama >/dev/null 2>&1 || ujust ramalama-bootstrap
     ujust ai-gpu-doctor
-    ramalama run "{{ MODEL }}" "Reply with only: ok"
+    ramalama run "${MODEL}" "Reply with only: ok"

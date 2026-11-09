@@ -52,6 +52,7 @@ sudo-clean:
     just sudoif just clean
 
 # sudoif bash function
+[positional-arguments]
 [private]
 sudoif command *args:
     #!/usr/bin/bash
@@ -66,7 +67,7 @@ sudoif command *args:
             exit 1
         fi
     }
-    sudoif {{ command }} {{ args }}
+    sudoif "$@"
 
 # This Justfile recipe builds a container image using Podman.
 #
@@ -93,11 +94,11 @@ build $target_image=image_name $tag=default_tag:
     if [[ -z "$(git status -s)" ]]; then
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
     fi
-    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_ENABLE_DOCKER={{ enable_docker }}")
-    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_USER={{ agent_user }}")
-    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_USER_GROUPS={{ agent_user_groups }}")
-    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_DENY_GROUPS={{ agent_user_deny_groups }}")
-    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_ENABLE_LINGER={{ agent_user_enable_linger }}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_ENABLE_DOCKER=${enable_docker}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_USER=${agent_user}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_USER_GROUPS=${agent_user_groups}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_DENY_GROUPS=${agent_user_deny_groups}")
+    BUILD_ARGS+=("--build-arg" "BLUEFIN_AGENT_ENABLE_LINGER=${agent_user_enable_linger}")
 
     podman build \
         "${BUILD_ARGS[@]}" \
@@ -272,21 +273,27 @@ run-vm-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-
 run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "iso" "disk_config/iso.toml")
 
 # Run a virtual machine using systemd-vmspawn
-spawn-vm rebuild="0" type="qcow2" ram="6G":
+spawn-vm $rebuild="0" $type="qcow2" $ram="6G":
     #!/usr/bin/env bash
 
     set -euo pipefail
 
-    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the ISO" && just build-vm {{ rebuild }} {{ type }}
+    [[ "$rebuild" == 0 || "$rebuild" == 1 ]] || { echo "rebuild must be 0 or 1" >&2; exit 2; }
+    case "$type" in qcow2|raw|iso) ;; *) echo "Unsupported image type" >&2; exit 2 ;; esac
+    [[ "$ram" =~ ^[0-9]+[KMGT]?$ ]] || { echo "Invalid memory size" >&2; exit 2; }
+    if [[ "$rebuild" == 1 ]]; then
+        echo "Rebuilding the ISO"
+        just build-vm "$rebuild" "$type"
+    fi
 
     systemd-vmspawn \
       -M "bootc-image" \
       --console=gui \
       --cpus=2 \
-      --ram=$(echo {{ ram }}| /usr/bin/numfmt --from=iec) \
+      --ram="$(/usr/bin/numfmt --from=iec "$ram")" \
       --network-user-mode \
       --vsock=false --pass-ssh-key=false \
-      -i ./output/**/*.{{ type }}
+      -i ./output/**/*."${type}"
 
 # Runs shell check on all Bash scripts
 lint:

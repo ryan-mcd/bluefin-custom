@@ -2,25 +2,6 @@
 
 set -ouex pipefail
 
-### Install packages
-
-# Packages can be installed from any enabled yum repo on the image.
-# RPMfusion repos are available by default in ublue main images
-# List of rpmfusion packages can be found here:
-# https://mirrors.rpmfusion.org/mirrorlist?path=free/fedora/updates/43/x86_64/repoview/index.html&protocol=https&redirect=1
-
-# Keep host packages small. Language runtimes and fast-moving agent CLIs are
-# installed in the user's home via Homebrew/fnm or containers.
-dnf5 install -y \
-  clinfo \
-  git-lfs \
-  jq \
-  openssl \
-  ripgrep \
-  tmux
-
-/usr/bin/bash /ctx/dx-layer.sh
-
 #### Supply-chain and agent-runtime defaults
 
 : "${BLUEFIN_AGENT_USER:=claudex}"
@@ -40,6 +21,41 @@ for value_name in BLUEFIN_AGENT_USER_GROUPS BLUEFIN_AGENT_DENY_GROUPS; do
     exit 1
   fi
 done
+
+case "$BLUEFIN_AGENT_ENABLE_LINGER" in
+  [Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo]|1|0) ;;
+  *) echo "BLUEFIN_AGENT_ENABLE_LINGER must be true or false." >&2; exit 1 ;;
+esac
+
+
+### Install packages
+
+# Packages can be installed from any enabled yum repo on the image.
+# RPMfusion repos are available by default in ublue main images
+# List of rpmfusion packages can be found here:
+# https://mirrors.rpmfusion.org/mirrorlist?path=free/fedora/updates/43/x86_64/repoview/index.html&protocol=https&redirect=1
+
+# Keep host packages small. Language runtimes and fast-moving agent CLIs are
+# installed in the user's home via Homebrew/fnm or containers.
+dnf5 install -y \
+  clinfo \
+  git-lfs \
+  jq \
+  openssl \
+  ripgrep \
+  tmux
+
+/usr/bin/bash /ctx/dx-layer.sh
+
+# Refresh inherited packages with known available security fixes. Keep the
+# base image's kernel and its matching Bluefin kernel modules together.
+# Reassess this list against the image scan on each base upgrade.
+dnf5 upgrade -y \
+  python3-pillow \
+  libsoup3 \
+  glib-networking \
+  python3
+
 
 install -Dm0644 /ctx/npmrc /etc/npmrc
 install -Dm0644 /ctx/npmrc /usr/share/bluefin-agent/npmrc
@@ -66,8 +82,18 @@ BLUEFIN_AGENT_DENY_GROUPS="$BLUEFIN_AGENT_DENY_GROUPS"
 BLUEFIN_AGENT_ENABLE_LINGER="$BLUEFIN_AGENT_ENABLE_LINGER"
 EOF
 install -Dm0644 /ctx/ai-agents.just /usr/share/ublue-os/just/60-custom.just
-if ! grep -Fq '/usr/share/ublue-os/just/60-custom.just' /usr/share/ublue-os/justfile; then
-  cat >>/usr/share/ublue-os/justfile <<'EOF'
+# Bluefin versions use different ujust entry files. Prefer the current entry
+# and preserve older images that still use the legacy location.
+if [[ -f /usr/share/ublue-os/just/00-entry.just ]]; then
+  ujust_entry=/usr/share/ublue-os/just/00-entry.just
+elif [[ -f /usr/share/ublue-os/justfile ]]; then
+  ujust_entry=/usr/share/ublue-os/justfile
+else
+  echo "Cannot find Bluefin's ujust entry file." >&2
+  exit 1
+fi
+if ! grep -Fq '/usr/share/ublue-os/just/60-custom.just' "$ujust_entry"; then
+  cat >>"$ujust_entry" <<'EOF'
 
 # Bluefin agent custom recipes
 import "/usr/share/ublue-os/just/60-custom.just"
@@ -78,6 +104,10 @@ install -Dm0755 /ctx/bluefin-agent-ubuntu-setup /usr/bin/bluefin-agent-ubuntu-se
 install -Dm0755 /ctx/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run
 install -Dm0755 /ctx/bluefin-hermes-run /usr/bin/bluefin-hermes-run
 install -Dm0755 /ctx/bluefin-ai-profile /usr/bin/bluefin-ai-profile
+install -Dm0755 /ctx/bluefin-ai-dashboard /usr/bin/bluefin-ai-dashboard
+for asset in index.html style.css app.js; do
+  install -Dm0644 "/ctx/dashboard/$asset" "/usr/share/bluefin-agent/dashboard/$asset"
+done
 install -Dm0755 /ctx/bluefin-ai-firewall /usr/bin/bluefin-ai-firewall
 install -Dm0755 /ctx/bluefin-model-gateway /usr/bin/bluefin-model-gateway
 install -Dm0755 /ctx/bluefin-ramalama-quadlet-fix /usr/bin/bluefin-ramalama-quadlet-fix
@@ -95,6 +125,8 @@ test -x /usr/bin/bluefin-agent-ubuntu-setup
 test -x /usr/bin/bluefin-openclaw-run
 test -x /usr/bin/bluefin-hermes-run
 test -x /usr/bin/bluefin-ai-profile
+test -x /usr/bin/bluefin-ai-dashboard
+test -f /usr/share/bluefin-agent/dashboard/index.html
 test -x /usr/bin/bluefin-ai-firewall
 test -x /usr/bin/bluefin-model-gateway
 test -x /usr/bin/bluefin-ramalama-quadlet-fix
@@ -103,10 +135,10 @@ test -f /usr/share/bluefin-agent/hermes-release.conf
 test -f /etc/systemd/user/bluefin-hermes-gateway.service
 test -f /etc/systemd/user/bluefin-hermes-serve.service
 test -f /etc/systemd/user/bluefin-model-gateway.service
-ujust_recipes="$(/usr/bin/just --justfile /usr/share/ublue-os/justfile --list)"
-for recipe in ai-doctor ai-profile-set ai-profile-status hermes-release hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
-  if [[ "$ujust_recipes" != *"$recipe"* ]]; then
-    echo "Custom ujust recipe $recipe is not visible in /usr/share/ublue-os/justfile" >&2
+ujust_recipes="$(/usr/bin/ujust --summary)"
+for recipe in ai-dashboard ai-doctor ai-model-list ai-model-select ai-profile-set ai-profile-status hermes-release hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
+  if ! tr ' ' '\n' <<<"$ujust_recipes" | grep -Fxq "$recipe"; then
+    echo "Custom recipe $recipe is not visible through ujust." >&2
     echo "$ujust_recipes" >&2
     exit 1
   fi

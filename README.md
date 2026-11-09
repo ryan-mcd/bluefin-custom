@@ -393,3 +393,64 @@ ujust openclaw-gateway-status
 systemctl --user --no-pager --full status bluefin-ramalama.service
 ss -ltnp | grep -E ':(18789|8080)'
 ```
+
+## Local AI Dashboard
+
+The image includes a local control panel for the dedicated agent user. After
+building and rebasing to an image containing this change, enter that account and
+run:
+
+```bash
+ujust agent-user-enter
+ujust ai-dashboard
+```
+
+Open the private address printed in the terminal on the same machine. It
+contains a per-launch access token; treat it like a password and do not share
+it. The dashboard runs in the foreground; stop it with Ctrl+C. An alternate local port can be supplied with
+`bluefin-ai-dashboard --port 8766`. It binds only to loopback and requires the configured
+agent account. Anyone with the private address, or access to that account or its browser
+session, can operate its services; it is not a multi-user or remote administration
+service.
+
+The dashboard reads the configured model and profile, reports user service
+states and model endpoint readiness, lists downloaded models, and runs the
+existing model selection, profile, and Hermes integration recipes. Model
+selection can download a model and restart the model service. It does not
+change Hermes until **Connect** is selected. Profile changes can start or stop
+services and may expose authenticated services to the network; the existing
+separate administrator step remains necessary after changing the profile:
+
+```bash
+sudo ujust ai-profile-firewall-apply
+sudo ujust ai-profile-firewall-status
+```
+
+The dashboard preserves existing network and TLS settings rather than editing
+certificates or credentials. Follow the companion local AI quickstart for
+initial setup, network policy, and model compatibility. Dashboard status shows
+whether `/v1/models` responds; it does not prove GPU acceleration, model tool
+calling, firewall policy, or remote TLS trust.
+
+### Architecture assessment
+
+A ground-up rewrite is not warranted by the current repository. The existing
+image, user boundary, RamaLama/Hermes integration, profile workflows, and
+first-boot and security documentation provide a useful foundation. The main
+remaining work is to validate it on the target host and reduce coupling in the
+operational scripts. In particular:
+
+- Move configuration validation and model/service orchestration into a shared,
+  testable interface. Validate parameters before any service changes and
+  preserve argument boundaries when invoking downstream tools.
+- Make profile transitions transactional or explicitly recoverable: a failed
+  model download, Hermes setup, or service start can leave configuration and
+  running services out of sync. Report desired and actual state separately.
+- Add automated tests around profile transitions, generated Quadlets, firewall
+  rules, and failure paths, then run the documented first-boot checks on the
+  actual Bluefin hardware. A static review cannot establish runtime readiness.
+- Reduce duplicated environment/bootstrap code and track upstream DX and
+  runtime changes; pin remaining moving supply-chain inputs when practical.
+
+The dashboard intentionally reuses the current workflows. It does not replace
+those operational improvements or the separate root-run firewall step.

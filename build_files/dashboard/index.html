@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Bluefin AI · Control room</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">◈</span><span>bluefin <b>AI</b><small>AGENT HOST</small></span></div>
+    <div class="side-label">WORKSPACE</div>
+    <a class="nav active" href="#overview"><span>◫</span> Overview <i></i></a>
+    <a class="nav" href="#models"><span>◈</span> Models</a>
+    <a class="nav" href="#deployment"><span>⌘</span> Deployment</a>
+    <a class="nav" href="#activity"><span>≡</span> Activity</a>
+    <div class="sidebar-bottom"><div class="side-status"><span class="pulse"></span><div>Local control panel<small>Running on this machine</small></div></div><p>Built for the dedicated<br>agent account.</p></div>
+  </aside>
+  <main>
+    <header class="topbar"><span>WORKSPACE <span class="slash">/</span> OVERVIEW</span><span class="local-pill"><span></span> LOCAL SESSION</span></header>
+    <div class="content" id="overview">
+      <div class="heading"><div><div class="eyebrow"><span></span> YOUR AI WORKSPACE</div><h1>Control room<span>.</span></h1><p>One place to manage your local models and agent services.</p></div><button id="refresh" class="button secondary">↻ &nbsp; Refresh status</button></div>
+      <div id="notice" class="notice hidden" role="status"></div>
+      <section class="hero">
+        <div class="hero-copy"><div class="section-kicker">CURRENT CONFIGURATION <span> / 01</span></div><h2 id="hero-model">Loading model…</h2><p id="hero-description">Checking your workspace configuration.</p><div class="hero-tags"><span id="hero-profile">PROFILE —</span><span id="hero-context">CONTEXT —</span></div></div>
+        <div class="hero-art" aria-hidden="true"><div class="orb orb-one"></div><div class="orb orb-two"></div><div class="orb orb-three"></div><div class="orb-center">✳</div><span>LOCAL<br>INTELLIGENCE</span></div>
+        <div class="hero-foot"><span><i id="ready-dot"></i> <b id="readiness">CHECKING ENDPOINT</b></span><span id="endpoint">127.0.0.1 / —</span></div>
+      </section>
+      <div class="section-heading"><div><div class="eyebrow muted">AT A GLANCE</div><h2>Workspace health</h2></div><span class="subtle">Live service state</span></div>
+      <section class="health-grid" id="services" aria-label="Service status"></section>
+      <div class="two-col">
+        <section class="card" id="models"><div class="card-head"><div><div class="eyebrow muted">01 / INFERENCE</div><h2>Model selection</h2></div><span class="icon-box">◈</span></div><p class="card-desc">Choose a RamaLama model reference. The first start may download the model and take several minutes.</p><form id="model-form"><label for="model">MODEL REFERENCE</label><input id="model" name="model" required placeholder="e.g. llama3.2" autocomplete="off"><label for="context">CONTEXT LENGTH <span>tokens</span></label><input id="context" name="context" type="number" min="1" max="99999999" required><button class="button primary" type="submit">Select &amp; start model <span>↗</span></button></form><details><summary>View downloaded models <span>＋</span></summary><pre id="models-list">Loading…</pre></details><p class="footnote">Model selection leaves Hermes configuration unchanged.</p></section>
+        <section class="card" id="deployment"><div class="card-head"><div><div class="eyebrow muted">02 / ORCHESTRATION</div><h2>Deployment profile</h2></div><span class="icon-box">⌘</span></div><p class="card-desc">Choose which services run together. Your existing model and network settings are preserved.</p><form id="profile-form"><label for="profile">ACTIVE PROFILE</label><select id="profile" name="profile"><option value="disabled">Disabled</option><option value="model-only">Model only</option><option value="central-agent">Central agent</option><option value="remote-agents">Remote agents</option><option value="hybrid">Hybrid</option></select><div id="profile-description" class="profile-info"></div><button class="button secondary full" type="submit">Apply profile <span>↗</span></button></form><div class="divider"></div><div class="hermes-row"><div><strong>Connect Hermes</strong><p>Point an existing Hermes install at the selected model.</p></div><button id="hermes" class="small-button">Connect ↗</button></div><p class="footnote">Remote profiles also require an administrator to apply firewall rules.</p></section>
+      </div>
+      <section class="activity card" id="activity"><div class="card-head"><div><div class="eyebrow muted">03 / OPERATIONS</div><h2>Activity</h2></div><span id="job-state" class="status-label">READY</span></div><p id="activity-message">Actions you run here will appear below.</p><pre id="job-output" class="hidden"></pre></section>
+      <footer><span>BLUEFIN AI <b> / </b> AGENT HOST</span><span>LOCAL BY DESIGN <span class="footer-star">✳</span></span></footer>
+    </div>
+  </main>
+</div>
+</body>
+</html>
