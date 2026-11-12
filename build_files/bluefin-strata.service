@@ -1,0 +1,15 @@
+[Unit]
+Description=Strata Qwen inference backend
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bluefin-strata-run
+ExecStop=-/usr/bin/podman stop --time 120 bluefin-strata
+TimeoutStopSec=150
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

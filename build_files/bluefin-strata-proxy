@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Loopback OpenAI API adapter for a separately authenticated Strata server."""
+import argparse
+import http.client
+import json
+import os
+import re
+import stat
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlsplit
+
+MAX_BODY = 16 * 1024 * 1024
+HOP_HEADERS = frozenset(('connection', 'keep-alive', 'proxy-authenticate',
+                         'proxy-authorization', 'te', 'trailer',
+                         'transfer-encoding', 'upgrade'))
+
+
+def read_key(path):
+    """Read an agent-owned private key without following a final symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError('backend key must be a private file owned by the agent user')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            value = stream.read(257).strip()
+        if not re.fullmatch(rb'[0-9a-f]{64}', value):
+            raise ValueError('invalid backend key')
+        return value.decode('ascii')
+    finally:
+        os.close(fd)
+
+
+def upstream_headers(headers, key, body_length):
+    """Forward only the headers needed by API clients; always replace auth."""
+    result = {'Authorization': 'Bearer ' + key, 'Accept-Encoding': 'identity'}
+    for name in ('Content-Type', 'Accept'):
+        value = headers.get(name)
+        if value is not None:
+            result[name] = value
+    if body_length is not None:
+        result['Content-Length'] = str(body_length)
+    return result
+
+
+def response_headers(headers):
+    """Do not forward hop-by-hop framing or cookies to local clients."""
+    connection_tokens = set()
+    for name, value in headers:
+        if name.lower() == 'connection':
+            connection_tokens.update(token.strip().lower() for token in value.split(','))
+    allowed = {'content-type', 'cache-control', 'retry-after'}
+    return [(name, value) for name, value in headers
+            if name.lower() in allowed and name.lower() not in HOP_HEADERS
+            and name.lower() not in connection_tokens]
+
+
+def chunked_body(stream):
+    """Decode bounded HTTP/1.1 request chunks; never forward their framing."""
+    chunks = []
+    total = 0
+    while True:
+        if len(chunks) > 16384:
+            raise ValueError('Too many request chunks')
+        line = stream.readline(8193)
+        if not line.endswith(b'\r\n') or len(line) > 8192:
+            raise ValueError('Invalid chunk header')
+        size_text, separator, extension = line[:-2].partition(b';')
+        if not re.fullmatch(rb'[0-9a-fA-F]{1,8}', size_text):
+            raise ValueError('Invalid chunk size')
+        if separator and (not extension or any(c < 32 or c > 126 for c in extension)):
+            raise ValueError('Invalid chunk extension')
+        size = int(size_text, 16)
+        if total + size > MAX_BODY:
+            raise OverflowError('Request body too large')
+        if size == 0:
+            # Trailers are not needed by the model API; reject instead of
+            # interpreting headers that arrive after the authentication check.
+            if stream.readline(8193) != b'\r\n':
+                raise ValueError('Request trailers are not supported')
+            return b''.join(chunks)
+        chunk = stream.read(size)
+        if len(chunk) != size or stream.read(2) != b'\r\n':
+            raise ValueError('Incomplete chunk')
+        chunks.append(chunk)
+        total += size
+
+
+class Handler(BaseHTTPRequestHandler):
+    # Close-delimited responses preserve streaming without buffering and avoid
+    # forwarding upstream chunk framing after http.client has decoded it.
+    protocol_version = 'HTTP/1.0'
+
+    def log_message(self, format, *args):
+        # Paths and errors may contain client-provided information.
+        pass
+
+    def do_GET(self):
+        self.proxy()
+
+    def do_POST(self):
+        self.proxy()
+
+    def proxy(self):
+        host = self.headers.get('Host', '')
+        allowed_hosts = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        if self.server.server_port == 80:
+            allowed_hosts.update(('127.0.0.1', 'localhost'))
+        origin = self.headers.get('Origin')
+        if host not in allowed_hosts or (origin is not None and origin != 'http://' + host):
+            self.send_error(403)
+            return
+        try:
+            target = urlsplit(self.path)
+        except ValueError:
+            self.send_error(400, 'Invalid request target')
+            return
+        if target.scheme or target.netloc or not target.path.startswith('/v1/') or target.fragment:
+            self.send_error(404)
+            return
+        transfers = self.headers.get_all('Transfer-Encoding', [])
+        lengths = self.headers.get_all('Content-Length', [])
+        if (len(transfers) > 1 or (transfers and transfers[0].strip().lower() != 'chunked') or
+                (transfers and lengths) or len(lengths) > 1 or
+                (lengths and not re.fullmatch(r'[0-9]{1,8}', lengths[0]))):
+            self.send_error(400, 'Invalid Content-Length')
+            return
+        length = int(lengths[0]) if lengths else 0
+        if length > MAX_BODY:
+            self.send_error(413)
+            return
+        if self.command == 'POST' and not lengths and not transfers:
+            self.send_error(411)
+            return
+        try:
+            body = chunked_body(self.rfile) if transfers else (self.rfile.read(length) if length else b'')
+            if not transfers and len(body) != length:
+                raise ValueError('Incomplete request body')
+        except (ValueError, OverflowError) as exc:
+            self.send_error(413 if isinstance(exc, OverflowError) else 400, str(exc))
+            return
+        length = len(body)
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.upstream_port, timeout=3600)
+        sent = False
+        try:
+            path = target.path + ('?' + target.query if target.query else '')
+            headers = upstream_headers(self.headers, self.server.backend_key,
+                                       length if self.command == 'POST' or lengths or transfers else None)
+            connection.request(self.command, path, body=body if length else None, headers=headers)
+            response = connection.getresponse()
+            self.send_response(response.status)
+            self.send_header('X-Bluefin-Strata-Adapter', '1')
+            for name, value in response_headers(response.getheaders()):
+                self.send_header(name, value)
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            sent = True
+            while True:
+                chunk = response.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (OSError, http.client.HTTPException):
+            if not sent:
+                self.send_error(502, 'Strata backend unavailable')
+        finally:
+            self.close_connection = True
+            connection.close()
+
+
+def port(value):
+    if not re.fullmatch(r'[1-9][0-9]{0,4}', value) or int(value) > 65535:
+        raise argparse.ArgumentTypeError('port must be between 1 and 65535')
+    return int(value)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--runtime-config', required=True, type=Path)
+    parser.add_argument('--key-file', required=True, type=Path)
+    args = parser.parse_args()
+    try:
+        settings = json.loads(args.runtime_config.read_text())
+        local_port = port(str(settings['local_port']))
+        upstream_port = port(str(settings['upstream_port']))
+        if local_port == upstream_port:
+            raise ValueError('the local and upstream ports must differ')
+        key = read_key(args.key_file)
+        server = ThreadingHTTPServer(('127.0.0.1', local_port), Handler)
+    except (OSError, ValueError, KeyError, TypeError, argparse.ArgumentTypeError) as exc:
+        parser.exit(1, f'Cannot start Strata adapter: {exc}\n')
+    server.daemon_threads = True
+    server.upstream_port = upstream_port
+    server.backend_key = key
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+model="${1:-}"
+context="${2:-}"
+local_port="${3:-}"
+upstream_port="${4:-18080}"
+timeout="${BLUEFIN_STRATA_STARTUP_TIMEOUT:-1800}"
+
+case "$model" in
+  Q2_0|IQ2_XS|IQ3_XXS|IQ3_S) ;;
+  *) echo 'Unsupported Strata model; choose Q2_0, IQ2_XS, IQ3_XXS, or IQ3_S.' >&2; exit 2 ;;
+esac
+if [[ ! "$context" =~ ^[1-9][0-9]{0,7}$ ]]; then
+  echo 'Invalid context length.' >&2; exit 2
+fi
+for port in "$local_port" "$upstream_port"; do
+  if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
+    echo 'Ports must be between 1 and 65535.' >&2; exit 2
+  fi
+done
+if [[ "$local_port" == "$upstream_port" ]] || [[ ! "$timeout" =~ ^[1-9][0-9]{1,4}$ ]] || (( timeout < 30 || timeout > 3500 )); then
+  echo 'Ports must differ and startup timeout must be between 30 and 3500 seconds.' >&2; exit 2
+fi
+
+bluefin-agent-user require
+bluefin-strata-prepare "$model" "$context" "$local_port" "$upstream_port"
+systemctl --user daemon-reload
+systemctl --user restart bluefin-strata.service bluefin-strata-proxy.service
+echo "Waiting up to ${timeout} seconds for Strata to load; first use may download many gigabytes."
+deadline=$((SECONDS + timeout))
+while (( SECONDS < deadline )); do
+  if systemctl --user is-active --quiet bluefin-strata.service && \
+     systemctl --user is-active --quiet bluefin-strata-proxy.service && \
+     models="$(bluefin-strata-check "$local_port" 2>/dev/null)"; then
+    echo 'Strata is ready; model identifiers:'
+    printf '%s\n' "$models"
+    exit 0
+  fi
+  if systemctl --user is-failed --quiet bluefin-strata.service || systemctl --user is-failed --quiet bluefin-strata-proxy.service; then
+    echo 'Strata failed during startup; inspect the user service logs.' >&2
+    exit 1
+  fi
+  sleep 5
+done
+echo 'Strata did not become ready before the startup timeout; inspect the user service logs.' >&2
+exit 1

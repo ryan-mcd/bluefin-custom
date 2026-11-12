@@ -81,6 +81,28 @@ ai-profile-set $PROFILE="disabled" $MODEL="" $MODEL_PORT="" $CONTEXT_LENGTH="" $
         exit 1
       }
     fi
+    config_dir="${HOME}/.config/bluefin-ai"
+    config_file="${config_dir}/deployment.conf"
+    mkdir -p "$config_dir"
+    backup="$(mktemp "${config_dir}/.profile-backup.XXXXXX")"
+    had_config=false
+    if [[ -f "$config_file" ]]; then
+      cp "$config_file" "$backup"
+      had_config=true
+    fi
+    restore_on_failure() {
+      result=$?
+      if (( result != 0 )); then
+        if [[ "$had_config" == true ]]; then
+          mv -f "$backup" "$config_file"
+        else
+          rm -f "$config_file"
+        fi
+        echo "Profile change failed; previous configuration restored. Running services may differ; inspect ujust ai-profile-status." >&2
+      fi
+      rm -f "$backup"
+    }
+    trap restore_on_failure EXIT
     bluefin-ai-profile set \
       "${PROFILE}" \
       "${MODEL}" \
@@ -103,13 +125,12 @@ ai-profile-set $PROFILE="disabled" $MODEL="" $MODEL_PORT="" $CONTEXT_LENGTH="" $
     model="$(bluefin-ai-profile get MODEL)"
     model_port="$(bluefin-ai-profile get MODEL_PORT)"
     context_length="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
-    ujust ramalama-service-enable "$model" "$model_port" bluefin-ramalama "$context_length"
+    backend="$(bluefin-ai-profile get MODEL_BACKEND)"
+    bluefin-model-switch "$model" "$context_length" "$backend"
 
-    if [[ "$profile" == remote-agents || "$profile" == hybrid ]]; then
-      ujust ai-profile-model-gateway-configure
-    fi
     if [[ "$profile" == central-agent || "$profile" == hybrid ]]; then
-      ujust hermes-local-configure "$model" "$model_port" "$context_length"
+      api_model="$(curl --connect-timeout 2 --max-time 10 -fsS "http://127.0.0.1:${model_port}/v1/models" | jq -er '.data[0].id | select(type == "string" and length > 0)')"
+      ujust hermes-local-configure "$api_model" "$model_port" "$context_length"
       ujust hermes-lan-configure
     fi
 
@@ -128,67 +149,33 @@ ai-model-list:
     }
     ramalama list
 
-ai-model-select $MODEL="" $CONTEXT_LENGTH="":
+# Measure streaming latency and approximate output rate on the selected endpoint.
+ai-model-benchmark:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bluefin-agent-user require
+    port="$(bluefin-ai-profile get MODEL_PORT)"
+    exec bluefin-model-benchmark --port "$port"
+
+ai-model-select $MODEL="" $CONTEXT_LENGTH="" $BACKEND="ramalama":
     #!/usr/bin/env bash
     set -euo pipefail
 
     bluefin-agent-user require
-    command -v ramalama >/dev/null 2>&1 || {
-      echo "RamaLama is missing. Ask an administrator to install it with Homebrew, then run: ujust ramalama-bootstrap" >&2
-      exit 1
-    }
-
     model="${MODEL}"
+    backend="${BACKEND}"
     if [[ -z "$model" ]]; then
-      [[ -t 0 ]] || {
-        echo "Run interactively or supply a model: ujust ai-model-select <model> [context-length]" >&2
+      [[ "$backend" == ramalama && -t 0 ]] || {
+        echo "Supply a model: ujust ai-model-select <model> [context-length] [ramalama|strata]" >&2
         exit 2
       }
       echo "Downloaded RamaLama models:"
       ramalama list || true
-      echo
       read -r -p "Model name or registry reference: " model
     fi
-    if [[ ! "$model" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
-      echo "MODEL contains unsupported characters." >&2
-      exit 2
-    fi
-
-    profile="$(bluefin-ai-profile get PROFILE)"
-    if [[ "$profile" == disabled ]]; then
-      profile=model-only
-      echo "No AI profile is active; selecting model-only for loopback RamaLama access."
-    fi
-    model_port="$(bluefin-ai-profile get MODEL_PORT)"
-    context_length="${CONTEXT_LENGTH}"
-    [[ -n "$context_length" ]] || context_length="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
-    gateway_port="$(bluefin-ai-profile get MODEL_GATEWAY_PORT)"
-    access="$(bluefin-ai-profile get MODEL_GATEWAY_ACCESS)"
-    tls="$(bluefin-ai-profile get MODEL_GATEWAY_TLS)"
-    tls_cert="$(bluefin-ai-profile get MODEL_GATEWAY_TLS_CERT)"
-    tls_key="$(bluefin-ai-profile get MODEL_GATEWAY_TLS_KEY)"
-    gateway_image="$(bluefin-ai-profile get MODEL_GATEWAY_IMAGE)"
-
-    ujust ramalama-service-enable "$model" "$model_port" bluefin-ramalama "$context_length"
-    bluefin-ai-profile set \
-      "$profile" \
-      "$model" \
-      "$model_port" \
-      "$context_length" \
-      "$gateway_port" \
-      "$access" \
-      "$tls" \
-      "$tls_cert" \
-      "$tls_key" \
-      "$gateway_image"
-    echo "RamaLama model endpoint: http://127.0.0.1:${model_port}/v1"
-    echo "Hermes was not installed, configured, or restarted."
-    if [[ "$profile" == central-agent || "$profile" == hybrid ]]; then
-      echo "To point the existing local Hermes installation at this model, run: ujust ai-hermes-use-selected-model"
-    elif [[ "$profile" == model-only ]]; then
-      echo "To publish authenticated inference later, run: ujust ai-profile-set remote-agents"
-      echo "To add local Hermes later, install Hermes and run: ujust ai-profile-set central-agent"
-    fi
+    context="${CONTEXT_LENGTH}"
+    [[ -n "$context" ]] || context="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
+    bluefin-model-switch "$model" "$context" "$backend"
 
 ai-hermes-use-selected-model:
     #!/usr/bin/env bash
@@ -200,12 +187,12 @@ ai-hermes-use-selected-model:
       echo "Install Hermes first with: ujust hermes-install" >&2
       exit 1
     }
-    model="$(bluefin-ai-profile get MODEL)"
     model_port="$(bluefin-ai-profile get MODEL_PORT)"
     context_length="$(bluefin-ai-profile get MODEL_CONTEXT_LENGTH)"
+    model="$(curl --connect-timeout 2 --max-time 10 -fsS "http://127.0.0.1:${model_port}/v1/models" | jq -er '.data[0].id | select(type == "string" and length > 0)')"
     ujust hermes-local-configure "$model" "$model_port" "$context_length"
     systemctl --user try-restart bluefin-hermes-gateway.service bluefin-hermes-serve.service 2>/dev/null || true
-    echo "Hermes now uses the selected RamaLama model."
+    echo "Hermes now uses the model ID reported by the selected backend."
 
 ai-profile-model-gateway-configure:
     #!/usr/bin/env bash
@@ -301,7 +288,7 @@ ai-profile-model-gateway-configure:
 
                 proxy_pass http://127.0.0.1:${model_port};
                 proxy_http_version 1.1;
-                proxy_set_header Host \$host;
+                proxy_set_header Host 127.0.0.1:${model_port};
                 proxy_set_header Authorization "";
                 proxy_set_header Connection "";
                 proxy_buffering off;
@@ -1127,6 +1114,18 @@ ramalama-service-enable $MODEL="llama3.2" $PORT="8080" $NAME="bluefin-ramalama" 
     port="${PORT}"
     name="${NAME}"
     context_length="${CONTEXT_LENGTH}"
+    if [[ ! "$model" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
+      echo "MODEL contains unsupported characters." >&2
+      exit 2
+    fi
+    if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
+      echo "PORT must be between 1 and 65535." >&2
+      exit 2
+    fi
+    if [[ ! "$context_length" =~ ^[1-9][0-9]{0,7}$ ]]; then
+      echo "CONTEXT_LENGTH must be an integer between 1 and 99999999." >&2
+      exit 2
+    fi
     if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
       echo "NAME must be a simple service name." >&2
       exit 2
@@ -1158,7 +1157,9 @@ ramalama-service-enable $MODEL="llama3.2" $PORT="8080" $NAME="bluefin-ramalama" 
     ready=false
     deadline=$((SECONDS + startup_timeout))
     while (( SECONDS < deadline )); do
-      if curl --connect-timeout 2 --max-time 10 -fsS "http://127.0.0.1:${port}/v1/models" >/dev/null 2>&1; then
+      if systemctl --user is-active --quiet "${name}.service" && \
+         curl --connect-timeout 2 --max-time 10 -fsS "http://127.0.0.1:${port}/v1/models" 2>/dev/null | \
+           jq -e '.data | type == "array" and length > 0 and all(.[]; (.id | type == "string" and length > 0))' >/dev/null 2>&1; then
         ready=true
         break
       fi

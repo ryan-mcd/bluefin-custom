@@ -104,6 +104,13 @@ install -Dm0755 /ctx/bluefin-agent-ubuntu-setup /usr/bin/bluefin-agent-ubuntu-se
 install -Dm0755 /ctx/bluefin-openclaw-run /usr/bin/bluefin-openclaw-run
 install -Dm0755 /ctx/bluefin-hermes-run /usr/bin/bluefin-hermes-run
 install -Dm0755 /ctx/bluefin-ai-profile /usr/bin/bluefin-ai-profile
+install -Dm0755 /ctx/bluefin-strata-run /usr/bin/bluefin-strata-run
+install -Dm0755 /ctx/bluefin-strata-proxy /usr/bin/bluefin-strata-proxy
+install -Dm0755 /ctx/bluefin-strata-check /usr/bin/bluefin-strata-check
+install -Dm0755 /ctx/bluefin-strata-prepare /usr/bin/bluefin-strata-prepare
+install -Dm0755 /ctx/bluefin-strata-service-enable /usr/bin/bluefin-strata-service-enable
+install -Dm0755 /ctx/bluefin-model-switch /usr/bin/bluefin-model-switch
+install -Dm0755 /ctx/bluefin-model-benchmark /usr/bin/bluefin-model-benchmark
 install -Dm0755 /ctx/bluefin-ai-dashboard /usr/bin/bluefin-ai-dashboard
 for asset in index.html style.css app.js; do
   install -Dm0644 "/ctx/dashboard/$asset" "/usr/share/bluefin-agent/dashboard/$asset"
@@ -117,6 +124,8 @@ install -Dm0644 /ctx/openclaw-gateway.service /etc/systemd/user/openclaw-gateway
 install -Dm0644 /ctx/hermes-gateway.service /etc/systemd/user/bluefin-hermes-gateway.service
 install -Dm0644 /ctx/hermes-serve.service /etc/systemd/user/bluefin-hermes-serve.service
 install -Dm0644 /ctx/bluefin-model-gateway.service /etc/systemd/user/bluefin-model-gateway.service
+install -Dm0644 /ctx/bluefin-strata.service /etc/systemd/user/bluefin-strata.service
+install -Dm0644 /ctx/bluefin-strata-proxy.service /etc/systemd/user/bluefin-strata-proxy.service
 install -Dm0644 /ctx/sysctl-ai-agent.conf /etc/sysctl.d/90-ai-agent-workstation.conf
 install -Dm0644 /ctx/openclaw-gateway-localhost.conf /etc/systemd/user/openclaw-gateway.service.d/10-localhost-defaults.conf
 
@@ -125,6 +134,13 @@ test -x /usr/bin/bluefin-agent-ubuntu-setup
 test -x /usr/bin/bluefin-openclaw-run
 test -x /usr/bin/bluefin-hermes-run
 test -x /usr/bin/bluefin-ai-profile
+test -x /usr/bin/bluefin-model-switch
+test -x /usr/bin/bluefin-model-benchmark
+test -x /usr/bin/bluefin-strata-run
+test -x /usr/bin/bluefin-strata-prepare
+test -x /usr/bin/bluefin-strata-proxy
+test -x /usr/bin/bluefin-strata-check
+test -x /usr/bin/bluefin-strata-service-enable
 test -x /usr/bin/bluefin-ai-dashboard
 test -f /usr/share/bluefin-agent/dashboard/index.html
 test -x /usr/bin/bluefin-ai-firewall
@@ -135,8 +151,10 @@ test -f /usr/share/bluefin-agent/hermes-release.conf
 test -f /etc/systemd/user/bluefin-hermes-gateway.service
 test -f /etc/systemd/user/bluefin-hermes-serve.service
 test -f /etc/systemd/user/bluefin-model-gateway.service
+test -f /etc/systemd/user/bluefin-strata.service
+test -f /etc/systemd/user/bluefin-strata-proxy.service
 ujust_recipes="$(/usr/bin/ujust --summary)"
-for recipe in ai-dashboard ai-doctor ai-model-list ai-model-select ai-profile-set ai-profile-status hermes-release hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
+for recipe in ai-dashboard ai-doctor ai-model-list ai-model-benchmark ai-model-select ai-profile-set ai-profile-status hermes-release hermes-install hermes-doctor hermes-gateway-enable hermes-lan-enable hermes-local-smoke; do
   if ! tr ' ' '\n' <<<"$ujust_recipes" | grep -Fxq "$recipe"; then
     echo "Custom recipe $recipe is not visible through ujust." >&2
     echo "$ujust_recipes" >&2

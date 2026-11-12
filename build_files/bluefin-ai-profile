@@ -8,6 +8,7 @@ USER_CONFIG="${HOME}/.config/bluefin-ai/deployment.conf"
 load_config() {
   PROFILE=disabled
   MODEL=llama3.2
+  MODEL_BACKEND=ramalama
   MODEL_PORT=8080
   MODEL_CONTEXT_LENGTH=64000
   MODEL_GATEWAY_PORT=8643
@@ -28,7 +29,7 @@ load_config() {
 validate_port() {
   local name="$1"
   local value="$2"
-  if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < 1 || value > 65535 )); then
+  if [[ ! "$value" =~ ^[1-9][0-9]{0,4}$ ]] || (( value > 65535 )); then
     echo "$name must be between 1 and 65535." >&2
     exit 2
   fi
@@ -39,14 +40,24 @@ validate_config() {
     model-only|central-agent|remote-agents|hybrid|disabled) ;;
     *) echo "Unsupported profile: $PROFILE" >&2; exit 2 ;;
   esac
-  if [[ ! "$MODEL" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
+  if [[ ${#MODEL} -gt 500 || ! "$MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; then
     echo "MODEL contains unsupported characters." >&2
     exit 2
   fi
+  case "$MODEL_BACKEND" in
+    ramalama) ;;
+    strata)
+      case "$MODEL" in
+        Q2_0|IQ2_XS|IQ3_XXS|IQ3_S) ;;
+        *) echo "Unsupported Strata model: choose a supported Qwen3.8-Flash-Next quantization (Q2_0, IQ2_XS, IQ3_XXS, IQ3_S)." >&2; exit 2 ;;
+      esac
+      ;;
+    *) echo "Unsupported MODEL_BACKEND: $MODEL_BACKEND" >&2; exit 2 ;;
+  esac
   validate_port MODEL_PORT "$MODEL_PORT"
   validate_port MODEL_GATEWAY_PORT "$MODEL_GATEWAY_PORT"
-  if [[ ! "$MODEL_CONTEXT_LENGTH" =~ ^[0-9]+$ ]] || (( MODEL_CONTEXT_LENGTH < 1 )); then
-    echo "MODEL_CONTEXT_LENGTH must be a positive integer." >&2
+  if [[ ! "$MODEL_CONTEXT_LENGTH" =~ ^[1-9][0-9]{0,7}$ ]]; then
+    echo "MODEL_CONTEXT_LENGTH must be between 1 and 99999999." >&2
     exit 2
   fi
   if [[ "$PROFILE" == central-agent || "$PROFILE" == remote-agents || "$PROFILE" == hybrid ]] && (( MODEL_CONTEXT_LENGTH < 64000 )); then
@@ -84,6 +95,7 @@ write_config() {
   {
     printf 'PROFILE=%q\n' "$PROFILE"
     printf 'MODEL=%q\n' "$MODEL"
+    printf 'MODEL_BACKEND=%q\n' "$MODEL_BACKEND"
     printf 'MODEL_PORT=%q\n' "$MODEL_PORT"
     printf 'MODEL_CONTEXT_LENGTH=%q\n' "$MODEL_CONTEXT_LENGTH"
     printf 'MODEL_GATEWAY_PORT=%q\n' "$MODEL_GATEWAY_PORT"
@@ -101,6 +113,7 @@ show_config() {
   cat <<EOF
 profile:               $PROFILE
 model:                 $MODEL
+model backend:         $MODEL_BACKEND
 model port:            $MODEL_PORT
 model context:         $MODEL_CONTEXT_LENGTH
 model gateway port:    $MODEL_GATEWAY_PORT
@@ -112,7 +125,20 @@ EOF
 }
 
 apply_profile() {
+  local timeout="${BLUEFIN_MODEL_STARTUP_TIMEOUT:-1800}"
+  if [[ ! "$timeout" =~ ^[1-9][0-9]{1,4}$ ]] || (( timeout < 30 || timeout > 3500 )); then
+    echo "BLUEFIN_MODEL_STARTUP_TIMEOUT must be between 30 and 3500 seconds." >&2
+    return 2
+  fi
   bluefin-agent-user require
+  if [[ "$PROFILE" != disabled && "$MODEL_BACKEND" == strata ]]; then
+    if ! jq -e --arg model "$MODEL" --arg context "$MODEL_CONTEXT_LENGTH" --arg port "$MODEL_PORT" \
+      '.model == $model and (.context | tostring) == $context and (.local_port | tostring) == $port and .upstream_port == 18080' \
+      "${HOME}/.config/bluefin-ai/strata/runtime.json" >/dev/null 2>&1; then
+      echo 'Saved Strata runtime does not match the selected model, context and port; run ujust ai-model-select to prepare it.' >&2
+      return 1
+    fi
+  fi
   systemctl --user daemon-reload
 
   regular_services=(
@@ -124,8 +150,18 @@ apply_profile() {
   for service in "${regular_services[@]}"; do
     systemctl --user disable --now "$service" 2>/dev/null || true
   done
-  systemctl --user stop bluefin-ramalama.service 2>/dev/null || true
-  systemctl --user reset-failed "${regular_services[@]}" bluefin-ramalama.service 2>/dev/null || true
+  if [[ "$PROFILE" == disabled || "$MODEL_BACKEND" == strata ]]; then
+    systemctl --user stop bluefin-ramalama.service 2>/dev/null || true
+  fi
+  if [[ "$PROFILE" == disabled || "$MODEL_BACKEND" == ramalama ]]; then
+    systemctl --user disable --now bluefin-strata-proxy.service bluefin-strata.service 2>/dev/null || true
+  fi
+  systemctl --user reset-failed "${regular_services[@]}" bluefin-ramalama.service bluefin-strata.service bluefin-strata-proxy.service 2>/dev/null || true
+
+  model_services=(bluefin-ramalama.service)
+  if [[ "$MODEL_BACKEND" == strata ]]; then
+    model_services=(bluefin-strata.service bluefin-strata-proxy.service)
+  fi
 
   if [[ "$PROFILE" == disabled ]]; then
     rm -f "${HOME}/.config/containers/systemd/bluefin-ramalama.container"
@@ -134,22 +170,51 @@ apply_profile() {
 
   case "$PROFILE" in
     model-only)
-      systemctl --user start bluefin-ramalama.service
+      systemctl --user start "${model_services[@]}"
       ;;
     central-agent)
-      systemctl --user start bluefin-ramalama.service
+      systemctl --user start "${model_services[@]}"
       systemctl --user enable --now bluefin-hermes-gateway.service bluefin-hermes-serve.service
       ;;
     remote-agents)
-      systemctl --user start bluefin-ramalama.service
+      systemctl --user start "${model_services[@]}"
       systemctl --user enable --now bluefin-model-gateway.service
       ;;
     hybrid)
-      systemctl --user start bluefin-ramalama.service
+      systemctl --user start "${model_services[@]}"
       systemctl --user enable --now bluefin-model-gateway.service bluefin-hermes-gateway.service bluefin-hermes-serve.service
       ;;
     disabled) ;;
   esac
+  if [[ "$PROFILE" != disabled && "$MODEL_BACKEND" == strata ]]; then
+    systemctl --user enable bluefin-strata.service bluefin-strata-proxy.service
+  fi
+  if [[ "$PROFILE" != disabled ]]; then
+    local deadline=$((SECONDS + timeout)) ready=false service
+    while (( SECONDS < deadline )); do
+      ready=true
+      for service in "${model_services[@]}"; do
+        systemctl --user is-active --quiet "$service" || ready=false
+      done
+      if [[ "$ready" == true ]]; then
+        if [[ "$MODEL_BACKEND" == strata ]]; then
+          bluefin-strata-check "$MODEL_PORT" >/dev/null 2>&1 && return 0
+        elif curl --connect-timeout 2 --max-time 10 -fsS "http://127.0.0.1:${MODEL_PORT}/v1/models" 2>/dev/null | \
+          jq -e '.data | type == "array" and length > 0 and all(.[]; (.id | type == "string" and length > 0))' >/dev/null 2>&1; then
+          return 0
+        fi
+      fi
+      for service in "${model_services[@]}"; do
+        if systemctl --user is-failed --quiet "$service"; then
+          echo "$service failed; desired profile is $PROFILE, actual services are shown by status." >&2
+          return 1
+        fi
+      done
+      sleep 5
+    done
+    echo "Model endpoint did not become ready; desired profile is $PROFILE, actual services are shown by status." >&2
+    return 1
+  fi
 }
 
 status_profile() {
@@ -157,6 +222,8 @@ status_profile() {
   echo
   systemctl --user --no-pager --full status \
     bluefin-ramalama.service \
+    bluefin-strata.service \
+    bluefin-strata-proxy.service \
     bluefin-model-gateway.service \
     bluefin-hermes-gateway.service \
     bluefin-hermes-serve.service 2>/dev/null || true
@@ -178,6 +245,7 @@ case "${1:-}" in
     MODEL_GATEWAY_TLS_CERT="${9:-$MODEL_GATEWAY_TLS_CERT}"
     MODEL_GATEWAY_TLS_KEY="${10:-$MODEL_GATEWAY_TLS_KEY}"
     MODEL_GATEWAY_IMAGE="${11:-$MODEL_GATEWAY_IMAGE}"
+    MODEL_BACKEND="${12:-$MODEL_BACKEND}"
     validate_config
     write_config
     show_config
@@ -185,7 +253,7 @@ case "${1:-}" in
   get)
     key="${2:-}"
     case "$key" in
-      PROFILE|MODEL|MODEL_PORT|MODEL_CONTEXT_LENGTH|MODEL_GATEWAY_PORT|MODEL_GATEWAY_ACCESS|MODEL_GATEWAY_TLS|MODEL_GATEWAY_TLS_CERT|MODEL_GATEWAY_TLS_KEY|MODEL_GATEWAY_IMAGE)
+      PROFILE|MODEL|MODEL_BACKEND|MODEL_PORT|MODEL_CONTEXT_LENGTH|MODEL_GATEWAY_PORT|MODEL_GATEWAY_ACCESS|MODEL_GATEWAY_TLS|MODEL_GATEWAY_TLS_CERT|MODEL_GATEWAY_TLS_KEY|MODEL_GATEWAY_IMAGE)
         printf '%s\n' "${!key}"
         ;;
       *) echo "Unsupported configuration key: $key" >&2; exit 2 ;;

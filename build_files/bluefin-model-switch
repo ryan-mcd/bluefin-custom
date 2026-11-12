@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Switch the managed model backend, restoring prior runtime on failure."""
+import argparse
+import fcntl
+import http.client
+import json
+import os
+import re
+import signal
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SERVICES = ('bluefin-ramalama.service', 'bluefin-strata-proxy.service', 'bluefin-strata.service')
+STRATA_MODELS = frozenset(('Q2_0', 'IQ2_XS', 'IQ3_XXS', 'IQ3_S'))
+
+
+def run(args, *, check=True, capture=False):
+    return subprocess.run(args, check=check, text=True, capture_output=capture)
+
+
+def get(key):
+    return run(['bluefin-ai-profile', 'get', key], capture=True).stdout.strip()
+
+
+def systemctl(*args, check=True):
+    return run(['systemctl', '--user', *args], check=check, capture=True)
+
+
+def active(unit):
+    return systemctl('is-active', '--quiet', unit, check=False).returncode == 0
+
+
+def stop(unit):
+    # Stop even failed/auto-restarting units, so a scheduled restart cannot
+    # race the replacement. An absent generated RamaLama unit is normal.
+    result = systemctl('stop', unit, check=False)
+    if result.returncode and active(unit):
+        raise RuntimeError('could not stop ' + unit)
+
+
+def snapshot(path):
+    try:
+        path.lstat()
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('refusing to replace non-regular managed file: ' + str(path))
+        return path.read_bytes(), path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        return None
+
+
+def restore(path, previous):
+    if previous is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.bluefin-restore-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(previous[0])
+        os.chmod(name, previous[1])
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def validate(model, context, backend, profile, local_port, gateway_port):
+    if backend not in ('ramalama', 'strata'):
+        raise ValueError('Backend must be ramalama or strata.')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,499}', model):
+        raise ValueError('Invalid model reference.')
+    if backend == 'strata' and model not in STRATA_MODELS:
+        raise ValueError('Unsupported Strata model; choose Q2_0, IQ2_XS, IQ3_XXS, or IQ3_S.')
+    if not re.fullmatch(r'[1-9][0-9]{0,7}', context):
+        raise ValueError('Context must be between 1 and 99999999.')
+    if profile in ('central-agent', 'remote-agents', 'hybrid') and int(context) < 64000:
+        raise ValueError('Agent profiles require a context of at least 64000.')
+    if backend == 'strata' and ('18080' in (local_port, gateway_port)):
+        raise ValueError('Strata backend port 18080 conflicts with a configured model or gateway port.')
+
+
+def verify_gateway(port, tls, key_file, model_port, backend):
+    """Check gateway authentication and forwarding without putting keys in argv."""
+    line = key_file.read_text().strip()
+    if not re.fullmatch(r'MODEL_GATEWAY_API_KEY=[0-9a-f]{64}', line):
+        raise ValueError('Invalid model gateway credential.')
+    key = line.split('=', 1)[1]
+
+    def request(auth):
+        if tls == 'files':
+            connection = http.client.HTTPSConnection('127.0.0.1', int(port), timeout=2,
+                                                     context=ssl._create_unverified_context())
+        else:
+            connection = http.client.HTTPConnection('127.0.0.1', int(port), timeout=2)
+        try:
+            headers = {'Authorization': 'Bearer ' + key} if auth else {}
+            connection.request('GET', '/v1/models', headers=headers)
+            response = connection.getresponse()
+            data = response.read(1048577)
+            return response.status, data, response.getheader('X-Bluefin-Strata-Adapter')
+        finally:
+            connection.close()
+
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            unauth_status, _, _ = request(False)
+            auth_status, body, marker = request(True)
+            data = json.loads(body)
+            models = data.get('data', []) if isinstance(data, dict) else []
+            local = http.client.HTTPConnection('127.0.0.1', int(model_port), timeout=2)
+            try:
+                local.request('GET', '/v1/models')
+                local_response = local.getresponse()
+                local_data = json.loads(local_response.read(1048577))
+                local_models = local_data.get('data', []) if isinstance(local_data, dict) else []
+                local_status = local_response.status
+            finally:
+                local.close()
+            def ids(entries):
+                if not isinstance(entries, list):
+                    return []
+                return sorted(item['id'] for item in entries if isinstance(item, dict)
+                              and isinstance(item.get('id'), str) and item['id'])
+            if (unauth_status == 401 and auth_status == 200 and local_status == 200 and
+                    (backend != 'strata' or marker == '1') and ids(models) and ids(models) == ids(local_models)):
+                return
+        except (OSError, http.client.HTTPException, ValueError):
+            pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Model gateway did not pass authentication and forwarding checks.')
+        time.sleep(1)
+
+
+def switch(model, context, backend):
+    old_profile = get('PROFILE')
+    profile = 'model-only' if old_profile == 'disabled' else old_profile
+    port, gateway_port = get('MODEL_PORT'), get('MODEL_GATEWAY_PORT')
+    validate(model, context, backend, profile, port, gateway_port)
+    home = Path.home()
+    quadlet = home / '.config/containers/systemd/bluefin-ramalama.container'
+    runtime = home / '.config/bluefin-ai/strata/runtime.json'
+    gateway_dir = home / '.config/bluefin-ai/model-gateway'
+    has_gateway = profile in ('remote-agents', 'hybrid')
+    gateway_files = tuple(gateway_dir / name for name in ('nginx.conf', 'gateway.env', 'tls.crt', 'tls.key', 'Caddyfile'))
+    paths = (quadlet, runtime) + (gateway_files if has_gateway else ())
+    previous = {path: snapshot(path) for path in paths}
+    previously_active = {unit: active(unit) for unit in SERVICES}
+    gateway_active = has_gateway and active('bluefin-model-gateway.service')
+    gateway_modified = False
+    previously_enabled = {unit: systemctl('is-enabled', '--quiet', unit, check=False).returncode == 0
+                          for unit in SERVICES[1:]}
+    try:
+        for unit in SERVICES:
+            stop(unit)
+        systemctl('disable', *SERVICES[1:])
+        if backend == 'strata':
+            run(['bluefin-strata-service-enable', model, context, port, '18080'])
+            quadlet.unlink(missing_ok=True)
+            systemctl('daemon-reload')
+            systemctl('enable', *SERVICES[1:])
+        else:
+            run(['ujust', 'ramalama-service-enable', model, port, 'bluefin-ramalama', context])
+        if has_gateway:
+            # Existing nginx configuration may still forward the client's Host,
+            # which the local Strata adapter correctly refuses.
+            gateway_modified = True
+            run(['ujust', 'ai-profile-model-gateway-configure'])
+            if gateway_active:
+                systemctl('restart', 'bluefin-model-gateway.service')
+                verify_gateway(gateway_port, get('MODEL_GATEWAY_TLS'), gateway_dir / 'gateway.env', port, backend)
+        # Commit desired state only after the candidate service reports readiness.
+        run(['bluefin-ai-profile', 'set', profile, model, '', context, '', '', '', '', '', '', backend])
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+        print('Model switch failed; restoring the previous runtime.', file=sys.stderr)
+        recovery_errors = []
+        for unit in SERVICES:
+            try:
+                stop(unit)
+            except (OSError, RuntimeError, subprocess.CalledProcessError) as err:
+                recovery_errors.append(str(err))
+        try:
+            systemctl('disable', *SERVICES[1:], check=False)
+            for path, content in previous.items():
+                restore(path, content)
+            systemctl('daemon-reload')
+            for unit, enabled in previously_enabled.items():
+                if enabled:
+                    systemctl('enable', unit)
+            for unit in reversed(SERVICES):
+                if previously_active[unit]:
+                    systemctl('start', unit)
+            if gateway_modified and gateway_active:
+                systemctl('restart', 'bluefin-model-gateway.service')
+        except (OSError, subprocess.CalledProcessError) as err:
+            recovery_errors.append(str(err))
+        if recovery_errors:
+            print('Recovery was incomplete; inspect service status and logs: ' + '; '.join(recovery_errors), file=sys.stderr)
+        else:
+            print('Previous configuration retained; service restart was attempted. Check actual readiness.', file=sys.stderr)
+        raise exc
+    print(f'{backend} model endpoint: http://127.0.0.1:{port}/v1')
+    print('Hermes configuration was not changed; connect it separately if needed.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('model')
+    parser.add_argument('context')
+    parser.add_argument('backend', choices=('ramalama', 'strata'))
+    args = parser.parse_args()
+    def interrupted(_signum, _frame):
+        raise RuntimeError('operation interrupted')
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        # Validate caller-supplied values before creating the lock or changing services.
+        validate(args.model, args.context, args.backend, 'model-only', '8080', '8643')
+        run(['bluefin-agent-user', 'require'])
+        directory = Path.home() / '.config/bluefin-ai'
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (directory / 'model-switch.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            switch(args.model, args.context, args.backend)
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, f'Model switch failed: {exc}\n')
+
+
+if __name__ == '__main__':
+    main()

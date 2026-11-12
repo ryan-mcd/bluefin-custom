@@ -4,8 +4,10 @@ import argparse
 import hmac
 import http.client
 import json
+import os
 import re
 import secrets
+import signal
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,17 +18,37 @@ ASSETS = Path('/usr/share/bluefin-agent/dashboard')
 if not ASSETS.is_dir():
     ASSETS = Path(__file__).resolve().parent / 'dashboard'
 PROFILES = {'disabled', 'model-only', 'central-agent', 'remote-agents', 'hybrid'}
-KEYS = ('PROFILE', 'MODEL', 'MODEL_PORT', 'MODEL_CONTEXT_LENGTH', 'MODEL_GATEWAY_PORT', 'MODEL_GATEWAY_ACCESS', 'MODEL_GATEWAY_TLS')
-SERVICES = {'Model runtime': 'bluefin-ramalama.service', 'Model gateway': 'bluefin-model-gateway.service', 'Hermes gateway': 'bluefin-hermes-gateway.service', 'Hermes API': 'bluefin-hermes-serve.service'}
+KEYS = ('PROFILE', 'MODEL', 'MODEL_BACKEND', 'MODEL_PORT', 'MODEL_CONTEXT_LENGTH', 'MODEL_GATEWAY_PORT', 'MODEL_GATEWAY_ACCESS', 'MODEL_GATEWAY_TLS')
+SERVICES = {'RamaLama': 'bluefin-ramalama.service', 'Strata': 'bluefin-strata.service', 'Strata adapter': 'bluefin-strata-proxy.service', 'Model gateway': 'bluefin-model-gateway.service', 'Hermes gateway': 'bluefin-hermes-gateway.service', 'Hermes API': 'bluefin-hermes-serve.service'}
+STRATA_MODELS = {'Q2_0', 'IQ2_XS', 'IQ3_XXS', 'IQ3_S'}
 job_lock = threading.Lock()
 job = {'state': 'idle', 'output': '', 'action': ''}
 
 
 def run(args, timeout=8):
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
-        return result.returncode, (result.stdout + result.stderr).strip()
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+            return process.returncode, (stdout + stderr).strip()
+        except subprocess.TimeoutExpired:
+            # Terminate the complete recipe tree, not just ujust. A model switch
+            # handles SIGTERM and can restore the prior runtime before exiting.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=150 if timeout > 60 else 5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+            return 1, f'Command timed out after {timeout} seconds; inspect service status.'
+    except OSError as exc:
         return 1, str(exc)
 
 
@@ -44,20 +66,30 @@ def status():
         code, value = run(['systemctl', '--user', 'is-active', unit])
         services[label] = value if value in ('active', 'inactive', 'failed', 'activating', 'deactivating') else 'unknown'
     ready = False
+    api_models = []
     port = config.get('MODEL_PORT', '')
     if port.isdigit() and 1 <= int(port) <= 65535:
         connection = http.client.HTTPConnection('127.0.0.1', int(port), timeout=2)
         try:
             connection.request('GET', '/v1/models')
-            ready = connection.getresponse().status == 200
-        except (OSError, http.client.HTTPException):
+            response = connection.getresponse()
+            if response.status == 200:
+                payload = json.loads(response.read(1048577))
+                data = payload.get('data', [])
+                if isinstance(data, list):
+                    api_models = [item['id'] for item in data if isinstance(item, dict) and isinstance(item.get('id'), str)]
+                expected = ('Strata', 'Strata adapter') if config.get('MODEL_BACKEND') == 'strata' else ('RamaLama',)
+                correct_adapter = (config.get('MODEL_BACKEND') != 'strata' or
+                                   response.getheader('X-Bluefin-Strata-Adapter') == '1')
+                ready = bool(api_models) and correct_adapter and all(services[name] == 'active' for name in expected)
+        except (OSError, http.client.HTTPException, ValueError, AttributeError):
             pass
         finally:
             connection.close()
     code, models = run(['ujust', 'ai-model-list'], timeout=15)
     with job_lock:
         current_job = dict(job)
-    return {'config': config, 'services': services, 'ready': ready, 'models': models, 'models_error': bool(code), 'errors': errors, 'job': current_job}
+    return {'config': config, 'services': services, 'ready': ready, 'api_models': api_models, 'models': models, 'models_error': bool(code), 'errors': errors, 'job': current_job}
 
 
 def command_for(data):
@@ -66,16 +98,22 @@ def command_for(data):
     action = data.get('action')
     if action == 'model':
         model, context = data.get('model', ''), str(data.get('context', ''))
-        if not isinstance(model, str) or len(model) > 500 or not re.fullmatch(r'[A-Za-z0-9._:/+\-]+', model):
-            raise ValueError('Enter a valid RamaLama model reference.')
-        if not re.fullmatch(r'[0-9]{1,8}', context) or int(context) < 1:
+        backend = data.get('backend', 'ramalama')
+        if backend not in ('ramalama', 'strata'):
+            raise ValueError('Choose a supported backend.')
+        if not isinstance(model, str) or len(model) > 500 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/+\-]*', model):
+            raise ValueError('Enter a valid model reference.')
+        if backend == 'strata' and model not in STRATA_MODELS:
+            raise ValueError('For Strata choose Q2_0, IQ2_XS, IQ3_XXS, or IQ3_S.')
+        if not re.fullmatch(r'[1-9][0-9]{0,7}', context):
             raise ValueError('Context must be a positive integer.')
         code, profile = run(['bluefin-ai-profile', 'get', 'PROFILE'])
         if code:
             raise ValueError('Cannot read the current profile. Check the configuration before selecting a model.')
         if profile in ('central-agent', 'remote-agents', 'hybrid') and int(context) < 64000:
             raise ValueError('Agent profiles require a context of at least 64000 tokens.')
-        return ['ujust', 'ai-model-select', model, context]
+        command = ['ujust', 'ai-model-select', model, context]
+        return command + ['strata'] if backend == 'strata' else command
     if action == 'profile':
         profile = data.get('profile')
         if profile not in PROFILES:
@@ -92,7 +130,7 @@ def start_job(command, action):
             return False
         job.update(state='running', output='Starting…', action=action)
     def work():
-        code, output = run(command, timeout=3600)
+        code, output = run(command, timeout=9000)
         with job_lock:
             job.update(state='succeeded' if code == 0 else 'failed', output=output[-20000:] or ('Completed.' if code == 0 else 'Command failed.'))
     threading.Thread(target=work, daemon=True).start()

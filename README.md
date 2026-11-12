@@ -454,3 +454,130 @@ operational scripts. In particular:
 
 The dashboard intentionally reuses the current workflows. It does not replace
 those operational improvements or the separate root-run firewall step.
+
+## Strata Qwen3.8 Flash Next backend
+
+The optional Strata path is intended for a Linux Strix Halo (gfx1151) agent
+host. The integration is experimental until verified on that host; installing
+this image does not download or start a model. Existing configurations default
+to RamaLama. Strata selection currently accepts the **ISTA-DASLab original
+Qwen3.8-Flash-Next** quantizations `Q2_0`, `IQ2_XS`, `IQ3_XXS`, and `IQ3_S`;
+other model families, providers, and local GGUF paths are not supported by this
+integration. Strata's own broader model support is not a guarantee that this
+integration supports those combinations.
+
+After building and rebasing the updated Bluefin image, enter the dedicated agent
+account and run, for example:
+
+```bash
+ujust agent-user-enter
+ujust ai-gpu-doctor
+ujust ai-model-select IQ3_XXS 64000 strata
+ujust ai-profile-status
+curl -fsS http://127.0.0.1:8080/v1/models | jq .
+# Configure an existing Hermes installation only when desired:
+ujust ai-hermes-use-selected-model
+ujust hermes-local-smoke
+```
+
+The dashboard offers the same backend choice. Model selection does not change
+Hermes; its **Connect** action configures Hermes with the ID returned by the
+active endpoint. To switch back, use the original two-argument form, for example
+`ujust ai-model-select llama3.2 64000`, or select RamaLama in the dashboard.
+The model service and its adapter must answer before selection is recorded as
+successful. On a failed switch, the helper restores the previous managed files
+and attempts to restart services that were running; check `ujust
+ai-profile-status` and endpoint readiness afterward. A failed profile change
+restores the saved profile, but services may need manual recovery. No model
+volume is deleted by a switch.
+
+On the target host, verify the backend rejects an unauthenticated direct
+request, the local adapter returns the actual model ID, and the benchmark
+receives a complete stream:
+
+```bash
+curl -sS -o /dev/null -w 'backend HTTP %{http_code}\n' http://127.0.0.1:18080/v1/models
+curl -fsS http://127.0.0.1:8080/v1/models | jq -r '.data[].id'
+ujust ai-model-benchmark
+```
+
+The first command should report 401 while Strata is running. Use the configured
+model port in place of 8080 if changed. The benchmark sends model requests and
+does not validate structured tool calls; use the Hermes smoke test above for
+that separate check. Repeat after switching back to RamaLama with the same
+model files and comparable settings. If a model or endpoint does not support
+stream usage reporting, the benchmark can report latency but not a token rate.
+
+Strata downloads the model and prepared data on first start into the rootless
+Podman volume `bluefin-strata-data`; this can take a long time and tens of GB
+of disk, plus space for prepared files and the container image. Upstream lists
+rough model-memory estimates of 37.6 GB for Q2_0, 39.2 GB for IQ2_XS, 47.0 GB
+for IQ3_XXS and 54.8 GB for IQ3_S. Leave additional shared memory for context,
+the OS and other applications; these figures do not establish that a given
+configuration fits. Consult [Strata's model guide](https://github.com/Niko1221/Strata/blob/v0.2.7/docs/MODELS.md)
+and the model provider's license and storage requirements before downloading.
+As checked on 2026-11-09, the [ISTA-DASLab model card](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
+labels its quantized files Apache-2.0, while the [original Qwen model card](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)
+labels the base model Qwen Community License 1.0. Review the relevant terms for
+the files and intended use; the labels alone do not resolve that relationship.
+Download and inference both have outbound network access in this configuration;
+the model container can write its dedicated data volume. A key is not a
+filesystem or network sandbox.
+
+The image reference is pinned to the version tag
+`ghcr.io/niko1221/strata:0.2.7-rocm-gfx1151`, not an immutable digest. Strata's
+source is [MIT licensed](https://github.com/Niko1221/Strata/blob/v0.2.7/LICENSE);
+the image, bundled engine and downloaded model assets have their own provenance
+and licensing to review. The [0.2.7 entrypoint](https://github.com/Niko1221/Strata/blob/v0.2.7/docker/entrypoint.sh)
+uses a key file, starts the launcher with the key in an environment variable,
+and writes a private copy into the data volume. Updating requires reviewing the
+new image, entrypoint, model compatibility and licenses, changing the version
+in `bluefin-strata-run`, rebuilding the Bluefin image and repeating the checks;
+a version tag alone does not prevent a registry tag from being replaced.
+
+The runtime uses rootless Podman with `/dev/kfd`, one `/dev/dri/renderD*` node,
+`keep-groups`, dropped capabilities, and no-new-privileges. It refuses to choose
+a GPU when there are multiple render nodes. It does not add the agent to
+administrative groups. The published image runs as root **inside** the rootless
+user namespace; this is not host root or an unprivileged container process.
+Confirm on the actual host that the agent can access the devices, rootless
+Podman uses a runtime supporting `keep-groups`, and SELinux permits the key
+bind mount and GPU access. Do not disable SELinux or use privileged mode as a
+workaround. The data volume and image remain writable in the ways needed by
+upstream; confirm UID mapping, ownership and graceful GPU memory release on the
+host. See [Strata's container guide](https://github.com/Niko1221/Strata/blob/v0.2.7/docs/DOCKER.md)
+and [Strix Halo notes](https://github.com/Niko1221/Strata/blob/v0.2.7/docs/STRIX_HALO.md).
+
+The ordinary local API stays at `127.0.0.1:8080` by default. A loopback-only,
+key-protected Strata listener uses port `18080`; the local adapter adds its
+separate backend key, while the remote model gateway retains its own incoming
+credential and firewall controls. Local clients, including other local users,
+can access the unauthenticated adapter just as they could the existing local
+RamaLama endpoint. The backend key is an agent-owned mode-0600 file in
+`~/.config/bluefin-ai/strata/`, is not printed by these helpers, and is also
+accessible to the container and account that runs it. The gateway does not
+make the adapter a boundary against other local users. The adapter accepts only
+its loopback Host values and rejects cross-origin browser requests; ordinary
+API clients and the gateway set the loopback Host when forwarding requests.
+Browser clients hosted on a different origin require a separately reviewed
+access design.
+
+For troubleshooting, inspect `systemctl --user status bluefin-strata.service
+bluefin-strata-proxy.service`, `journalctl --user -u bluefin-strata.service -f`,
+and `podman volume inspect bluefin-strata-data`. Check `ss -ltnp` and verify the
+remote gateway's unauthenticated request receives 401 before testing it with its
+separate credential. Validate a streaming response and a structured tool call
+with the actual model ID from `/v1/models`; `ujust hermes-local-smoke` exercises
+one Hermes tool call. These checks have not yet been run on the target host.
+For performance, compare Strata and RamaLama on the same checkpoint or as close a
+quantization as possible, context, prompt and output length; record both prompt
+and generation tokens per second over repeated runs after loading. Quality and
+memory use can differ across quantizations. `ujust ai-model-benchmark` sends the
+same fixed streaming prompt three times and reports time to first output and an
+approximate output token rate when the backend reports token usage. The rate
+uses the interval between first and last output events and includes the first
+event's tokens, so it is an approximation, not an engine-level decode measure.
+The benchmark reports unavailable usage rather than inventing a rate. Run it
+under matching conditions for each backend, and use an engine benchmark with a
+known prompt-token count for precise prefill measurements. No speedup is assumed
+here.

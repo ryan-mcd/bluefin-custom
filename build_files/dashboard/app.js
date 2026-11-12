@@ -5,7 +5,7 @@ const capability = sessionStorage.getItem('bluefin-dashboard-capability') || '';
 const authorization = {'Authorization': `Bearer ${capability}`};
 const descriptions = {
   'disabled': 'Stops managed AI services and removes the model Quadlet. Apply the firewall step afterward to remove managed remote rules.',
-  'model-only': 'Runs RamaLama on loopback only. No Hermes or remote model gateway services are started.',
+  'model-only': 'Runs the selected model on loopback only. No Hermes or remote model gateway services are started.',
   'central-agent': 'Runs the local model and Hermes services. Hermes must already be installed. Remote Hermes access requires the separate firewall step.',
   'remote-agents': 'Runs the local model and authenticated model gateway for remote agents. The separate firewall step is required.',
   'hybrid': 'Runs the local model, Hermes services, and authenticated model gateway. Hermes must already be installed; apply the firewall separately.'
@@ -24,7 +24,7 @@ async function refresh() {
     const data = await response.json();
     const c = data.config;
     $('#hero-model').textContent = c.MODEL || 'Model unavailable';
-    $('#hero-description').textContent = c.PROFILE === 'disabled' ? 'The workspace is disabled. Choose a model or profile to get started.' : 'Your selected model is managed by RamaLama on this machine.';
+    $('#hero-description').textContent = c.PROFILE === 'disabled' ? 'The workspace is disabled. Choose a model or profile to get started.' : `Selected backend: ${c.MODEL_BACKEND || 'ramalama'}. API model ID: ${(data.api_models || []).join(', ') || 'unavailable'}.`;
     $('#hero-profile').textContent = `PROFILE / ${c.PROFILE || 'UNKNOWN'}`.toUpperCase();
     $('#hero-context').textContent = `CONTEXT / ${c.MODEL_CONTEXT_LENGTH ? Number(c.MODEL_CONTEXT_LENGTH).toLocaleString() : '—'}`;
     $('#endpoint').textContent = `127.0.0.1 / ${c.MODEL_PORT || '—'}`;
@@ -33,6 +33,7 @@ async function refresh() {
     $('#models-list').textContent = data.models || (data.models_error ? 'Unable to list models.' : 'No models returned.');
     if (!loaded) {
       $('#model').value = c.MODEL || '';
+      $('#backend').value = c.MODEL_BACKEND || 'ramalama';
       $('#context').value = c.MODEL_CONTEXT_LENGTH || 64000;
       if (descriptions[c.PROFILE]) $('#profile').value = c.PROFILE;
       description(); loaded = true;
@@ -52,6 +53,7 @@ async function refresh() {
     $('#job-output').textContent = job.output; $('#job-output').classList.toggle('hidden', !job.output);
     if (lastState === 'running' && job.state !== 'running') {
       if (c.MODEL) $('#model').value = c.MODEL;
+      $('#backend').value = c.MODEL_BACKEND || 'ramalama';
       if (c.MODEL_CONTEXT_LENGTH) $('#context').value = c.MODEL_CONTEXT_LENGTH;
       if (descriptions[c.PROFILE]) $('#profile').value = c.PROFILE;
       description();
@@ -72,7 +74,7 @@ async function action(payload) {
     $('#activity').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   } catch (error) { setBusy(false); showNotice(error.message); }
 }
-$('#model-form').addEventListener('submit', event => { event.preventDefault(); action({action: 'model', model: $('#model').value.trim(), context: $('#context').value}); });
+$('#model-form').addEventListener('submit', event => { event.preventDefault(); action({action: 'model', model: $('#model').value.trim(), context: $('#context').value, backend: $('#backend').value}); });
 $('#profile-form').addEventListener('submit', event => { event.preventDefault(); const profile = $('#profile').value; if (confirm(`Apply the ${profile} profile? This restarts managed services. Remote profiles require a separate administrator firewall step.`)) action({action: 'profile', profile}); });
 $('#hermes').addEventListener('click', () => { if (confirm('Configure the existing Hermes installation to use the selected model?')) action({action: 'hermes'}); });
 $('#profile').addEventListener('change', description);

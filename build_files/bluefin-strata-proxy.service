@@ -1,0 +1,14 @@
+[Unit]
+Description=Local API adapter for Strata
+After=bluefin-strata.service
+Requires=bluefin-strata.service
+PartOf=bluefin-strata.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bluefin-strata-proxy --runtime-config %h/.config/bluefin-ai/strata/runtime.json --key-file %h/.config/bluefin-ai/strata/backend-key
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

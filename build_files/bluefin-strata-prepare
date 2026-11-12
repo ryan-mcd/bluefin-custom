@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Prepare private persistent Strata settings without starting a model."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import secrets
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+def load_helper(name):
+    path = Path(__file__).resolve().parent / name
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def prepare(base, settings, runtime, proxy):
+    runtime.validate(settings)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(base, 0o700)
+    key = base / 'backend-key'
+    try:
+        fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        proxy.read_key(key)
+    else:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(secrets.token_hex(32) + '\n')
+    fd, name = tempfile.mkstemp(prefix='.runtime-', dir=base)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(settings, stream)
+            stream.write('\n')
+        os.replace(name, base / 'runtime.json')
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('model')
+    parser.add_argument('context', type=int)
+    parser.add_argument('local_port', type=int)
+    parser.add_argument('upstream_port', type=int)
+    args = parser.parse_args()
+    runtime = load_helper('bluefin-strata-run')
+    proxy = load_helper('bluefin-strata-proxy')
+    settings = dict(model=args.model, context=args.context, local_port=args.local_port,
+                    upstream_port=args.upstream_port)
+    try:
+        runtime.validate(settings)
+        subprocess.run(['bluefin-agent-user', 'require'], check=True)
+        prepare(runtime.BASE, settings, runtime, proxy)
+    except (OSError, ValueError, TypeError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, f'Cannot prepare Strata: {exc}\n')
+
+
+if __name__ == '__main__':
+    main()

@@ -73,9 +73,12 @@ jobs:
           bash -n build_files/bluefin-openclaw-run
           bash -n build_files/bluefin-hermes-run
           bash -n build_files/bluefin-ai-profile
+          bash -n build_files/bluefin-strata-service-enable
           bash -n build_files/bluefin-ai-firewall
           bash -n build_files/bluefin-model-gateway
           bash -n build_files/bluefin-dx-groups
+          python3 -m py_compile build_files/bluefin-model-switch build_files/bluefin-model-benchmark build_files/bluefin-strata-run \
+            build_files/bluefin-strata-prepare build_files/bluefin-strata-proxy build_files/bluefin-strata-check
 
       - name: Security checks
         run: |
@@ -84,6 +87,7 @@ jobs:
             build_files/bluefin-agent-user build_files/bluefin-agent-ubuntu-setup \
             build_files/bluefin-openclaw-run build_files/bluefin-hermes-run \
             build_files/bluefin-ai-profile build_files/bluefin-ai-firewall \
+            build_files/bluefin-strata-service-enable \
             build_files/bluefin-model-gateway build_files/bluefin-dx-groups \
             build_files/bluefin-ramalama-quadlet-fix
           /tmp/bluefin-sast/bin/bandit -ll build_files/bluefin-ai-dashboard

@@ -61,6 +61,17 @@ fi''',
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.base / 'src' / 'safe-workspace').is_dir())
 
+    def test_ramalama_service_rejects_invalid_inputs_before_generating_quadlet(self):
+        for args in (['model;id', '8080', 'bluefin-ramalama', '64000'],
+                     ['llama3.2', '08080', 'bluefin-ramalama', '64000'],
+                     ['llama3.2', '65536', 'bluefin-ramalama', '64000'],
+                     ['llama3.2', '8080', 'bluefin-ramalama', '064000'],
+                     ['llama3.2', '8080', 'bluefin-ramalama', '999999999']):
+            with self.subTest(args=args):
+                result = self.recipe('ramalama-service-enable', *args)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse((self.base / '.config/containers/systemd').exists())
+
     def test_root_build_options_are_not_shell_source(self):
         podman = self.bin / 'podman'
         podman.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$RECIPE_ARGUMENT_LOG\"\n")
