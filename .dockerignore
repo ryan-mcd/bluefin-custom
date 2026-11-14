@@ -1,0 +1,4 @@
+# Keep Python validation output out of Docker/Podman/Buildah contexts.
+**/__pycache__
+**/*.pyc
+**/*.pyo

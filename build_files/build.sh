@@ -121,7 +121,10 @@ install -Dm0755 /ctx/bluefin-ramalama-quadlet-fix /usr/bin/bluefin-ramalama-quad
 # Image-owned platform defaults; credentials, model blobs and container storage
 # are created only after boot. Do not run Podman or rpm-ostree kargs in this build.
 install -d /usr/share/bluefin-ai/platform /usr/lib/systemd/user
-install -m0644 /ctx/ai-platform/* /usr/share/bluefin-ai/platform/
+# CI compilation can leave __pycache__ directories; install only source assets.
+find /ctx/ai-platform -maxdepth 1 -type f \
+  ! -name '*.pyc' ! -name '*.pyo' \
+  -exec install -m0644 -t /usr/share/bluefin-ai/platform {} +
 for executable in bluefin-ai-memory bluefin-ai-platform bluefin-ai-platform-boot bluefin-runtime-controller; do
   install -Dm0755 "/ctx/ai-platform/$executable" "/usr/bin/$executable"
 done
