@@ -129,12 +129,13 @@ def key(name):
 
 
 def runtime_quadlet(name, p):
-    devices = 'AddDevice=/dev/dri\nGroupAdd=keep-groups\n'
+    # Use run flags for compatibility with Ubuntu 24.04's Podman 4.9 Quadlet parser.
+    devices = 'AddDevice=/dev/dri\nPodmanArgs=--group-add=keep-groups\n'
     if p['accelerator'] == 'rocm':
         devices += 'AddDevice=/dev/kfd\n'
     env = ''.join('Environment=' + json.dumps(k + '=' + v) + '\n'
                   for k, v in p.get('environment', {}).items())
-    entrypoint = 'Entrypoint=' + json.dumps(p['entrypoint']) + '\n' if p.get('entrypoint') else ''
+    entrypoint = 'PodmanArgs=--entrypoint ' + json.dumps(p['entrypoint']) + '\n' if p.get('entrypoint') else ''
     return (f'[Unit]\nDescription=Managed {p["engine"]} runtime {name}\n'
             '[Container]\n' + f'Image={p["image"]}\nContainerName=bluefin-runtime-{name}\nUser=0\n'
             f'PublishPort=127.0.0.1:{p["port"]}:8080\n' + devices + env + entrypoint +
