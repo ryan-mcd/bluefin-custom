@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""Single-resident runtime controller and streaming admission proxy (loopback only)."""
+import contextlib
+import fcntl
+import hmac
+import http.client
+import json
+import os
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+BASE = Path.home() / '.config/bluefin-ai/platform'
+GIB = 1024 ** 3
+
+
+class Rejected(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def systemctl(*args):
+    subprocess.run(['systemctl', '--user', *args], check=True, capture_output=True, timeout=950)
+
+
+def available():
+    for line in Path('/proc/meminfo').read_text().splitlines():
+        if line.startswith('MemAvailable:'):
+            return int(line.split()[1]) * 1024
+    raise RuntimeError('MemAvailable is unavailable')
+
+
+def ready(profile):
+    connection = http.client.HTTPConnection('127.0.0.1', profile['port'], timeout=2)
+    try:
+        headers = {'Authorization': 'Bearer ' + profile['backend_key']} if profile.get('backend_key') else {}
+        connection.request('GET', '/v1/models', headers=headers)
+        response = connection.getresponse()
+        body = json.loads(response.read(1024 * 1024))
+        return response.status == 200 and any(m.get('id') == profile['backend_model']
+                                             for m in body.get('data', []))
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+class Controller:
+    def __init__(self, config, manage=systemctl, memory=available, health=ready):
+        self.config, self.profiles = config, config['profiles']
+        self.manage, self.memory, self.health = manage, memory, health
+        self.condition = threading.Condition()
+        self.current = self.pin = None
+        self.inflight = 0
+        self.switching = False
+        self.state = 'idle'
+        self.last_used = time.monotonic()
+        self.cooldown = {}
+        self.fault = False
+
+    @contextlib.contextmanager
+    def gate(self):
+        if not self.condition.acquire(blocking=False):
+            raise Rejected(503, 'Runtime operation in progress')
+        try:
+            if self.fault:
+                raise Rejected(503, 'Runtime cleanup failed; restart controller to reconcile')
+            yield
+        finally:
+            self.condition.release()
+
+    def stop(self, name):
+        try:
+            self.manage('stop', 'bluefin-runtime-' + name + '.service')
+        except Exception:
+            self.fault = True
+            raise
+
+    def start(self, name):
+        p = self.profiles[name]
+        if self.memory() < (p['resident_gib'] + self.config['reserve_gib']) * GIB:
+            raise Rejected(507, 'Insufficient host memory for weights, KV cache and runtime overhead')
+        self.manage('reset-failed', 'bluefin-runtime-' + name + '.service')
+        self.manage('start', 'bluefin-runtime-' + name + '.service')
+        deadline = time.monotonic() + self.config['startup_seconds']
+        while time.monotonic() < deadline:
+            if self.health(p):
+                return
+            time.sleep(1)
+        raise Rejected(503, 'Runtime readiness timed out')
+
+    def reconcile(self):
+        # Controller restart loses leases. Its old HTTP connections are gone.
+        # Never infer readiness from a persisted desired-state record.
+        for name in self.profiles:
+            self.stop(name)
+
+    def activate(self, target):
+        """Called with the condition held; all new requests fail fast during drain."""
+        if target == self.current and target is not None and self.health(self.profiles[target]):
+            return
+        if self.switching:
+            raise Rejected(503, 'Runtime switch already in progress')
+        if target is not None and self.cooldown.get(target, 0) > time.monotonic():
+            raise Rejected(503, 'Runtime is cooling down after a failed activation')
+        self.switching = True
+        self.state = 'draining'
+        old = self.current
+        try:
+            deadline = time.monotonic() + self.config['drain_seconds']
+            while self.inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Rejected(409, 'Active requests did not drain; runtime retained')
+                self.condition.wait(remaining)
+            if old is not None:
+                self.state = 'stopping'
+                self.stop(old)  # Failure here must not start a second engine.
+            self.current = None
+            if target is not None:
+                self.state = 'starting'
+                try:
+                    self.start(target)
+                except Exception:
+                    self.cooldown[target] = time.monotonic() + 60
+                    self.stop(target)  # If cleanup fails, do not restore another engine.
+                    if old is not None and old != target:
+                        try:
+                            self.start(old)
+                        except Exception:
+                            self.cooldown[old] = time.monotonic() + 60
+                            self.stop(old)
+                            raise
+                        self.current = old
+                    raise
+                self.current = target
+        finally:
+            self.switching = False
+            self.state = 'degraded' if self.fault else ('ready' if self.current else 'idle')
+            self.condition.notify_all()
+
+    @contextlib.contextmanager
+    def lease(self, alias):
+        with self.gate():
+            if self.switching:
+                raise Rejected(503, 'Runtime is draining or activating; retry later')
+            target = self.config['aliases'].get(alias)
+            if target is None:
+                raise Rejected(404, 'Unknown model alias')
+            if self.pin is not None and target != self.pin:
+                raise Rejected(409, 'A different runtime is manually pinned')
+            if self.inflight >= self.config['max_inflight']:
+                raise Rejected(429, 'Runtime concurrency limit reached')
+            self.activate(target)
+            if self.memory() < self.config['reserve_gib'] * GIB:
+                raise Rejected(507, 'Host memory reserve reached')
+            self.inflight += 1
+        try:
+            yield self.profiles[target]
+        finally:
+            with self.condition:
+                self.inflight -= 1
+                self.last_used = time.monotonic()
+                self.condition.notify_all()
+
+    def control(self, action, profile=None):
+        with self.gate():
+            if self.switching:
+                raise Rejected(503, 'A runtime switch is already draining')
+            if action == 'auto':
+                self.pin = None
+            elif action == 'pin' and isinstance(profile, str) and profile in self.profiles:
+                self.activate(profile)
+                self.pin = profile
+            elif action == 'unload':
+                self.activate(None)
+                self.pin = None
+            else:
+                raise Rejected(400, 'Use auto, unload, or pin with a configured profile')
+
+    def status(self):
+        # try-lock keeps status responsive during a long model startup.
+        if not self.condition.acquire(blocking=False):
+            return {'state': self.state, 'switching': True}
+        try:
+            return dict(state=self.state, current=self.current, pinned=self.pin, inflight=self.inflight)
+        finally:
+            self.condition.release()
+
+    def idle_loop(self):
+        while True:
+            time.sleep(5)
+            if not self.condition.acquire(blocking=False):
+                continue
+            try:
+                if (not self.fault and self.current and not self.pin and not self.inflight and not self.switching and
+                        time.monotonic() - self.last_used > self.config['idle_seconds']):
+                    self.activate(None)
+            except (OSError, subprocess.SubprocessError, Rejected):
+                self.state = 'degraded'
+            finally:
+                self.condition.release()
+
+
+class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.0 close-delimited responses avoid buffering or re-chunking SSE.
+    def log_message(self, *_args):
+        pass  # No prompts, authorization values or request paths in access logs.
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(30)
+
+    def send_json(self, status, body):
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        if status in (429, 503):
+            self.send_header('Retry-After', '5')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def authorized(self, admin=False):
+        key = self.server.admin_key if admin else self.server.inference_key
+        return hmac.compare_digest(self.headers.get('Authorization', '').encode(), ('Bearer ' + key).encode())
+
+    def do_GET(self):
+        if self.path == '/control/status' and self.authorized(True):
+            self.send_json(200, self.server.controller.status())
+        elif self.path == '/v1/models' and self.authorized():
+            self.send_json(200, {'object': 'list', 'data': [dict(id=a, object='model', owned_by='local')
+                           for a in self.server.controller.config['aliases']]})
+        else:
+            self.send_json(401, {'error': {'message': 'Unauthorized or unsupported route'}})
+
+    def do_POST(self):
+        controller = self.server.controller
+        admin = self.path == '/control/mode'
+        if not self.authorized(admin):
+            self.send_json(401, {'error': {'message': 'Unauthorized'}})
+            return
+        started = False
+        try:
+            if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
+                raise Rejected(400, 'One Content-Length required; chunked request bodies are unsupported')
+            size = int(self.headers['Content-Length'])
+            if not 0 < size <= 4 * 1024 * 1024:
+                raise Rejected(413, 'Request exceeds 4 MiB')
+            payload = self.rfile.read(size)
+            if len(payload) != size:
+                raise Rejected(400, 'Incomplete request body')
+            body = json.loads(payload)
+            if not isinstance(body, dict):
+                raise Rejected(400, 'JSON object required')
+            if admin:
+                controller.control(body.get('action'), body.get('profile'))
+                self.send_json(200, controller.status())
+                return
+            if self.path not in ('/v1/chat/completions', '/v1/completions'):
+                raise Rejected(404, 'Unsupported inference route')
+            alias = body.get('model')
+            if not isinstance(alias, str):
+                raise Rejected(400, 'String model alias required')
+            with controller.lease(alias) as profile:
+                body['model'] = profile['backend_model']
+                connection = http.client.HTTPConnection('127.0.0.1', profile['port'], timeout=300)
+                try:
+                    headers = {'Content-Type': 'application/json'}
+                    if profile.get('backend_key'):
+                        headers['Authorization'] = 'Bearer ' + profile['backend_key']
+                    connection.request('POST', self.path, json.dumps(body).encode(), headers)
+                    response = connection.getresponse()
+                    self.send_response(response.status)
+                    self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
+                    self.send_header('X-Accel-Buffering', 'no')
+                    self.end_headers()
+                    started = True
+                    # read1 forwards available SSE bytes immediately; read(n) may wait for n bytes.
+                    while True:
+                        chunk = response.read1(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                finally:
+                    connection.close()
+        except (Rejected, ValueError, OSError, http.client.HTTPException, subprocess.SubprocessError) as exc:
+            if not started:
+                code = exc.code if isinstance(exc, Rejected) else 502
+                self.send_json(code, {'error': {'message': str(exc), 'type': 'runtime_error'}})
+            # Once headers/tokens are sent, close the stream; never replay generation.
+
+
+def main():
+    os.umask(0o077)
+    config = json.loads((BASE / 'controller.json').read_text())
+    inference_key = (BASE / 'inference-key').read_text().strip()
+    for profile in config['profiles'].values():
+        if profile['requires_key']:
+            profile['backend_key'] = inference_key
+    lock = (BASE / 'controller.lock').open('a')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    controller = Controller(config)
+    controller.reconcile()
+    server = ThreadingHTTPServer(('127.0.0.1', 18100), Handler)
+    server.controller = controller
+    server.inference_key = inference_key
+    server.admin_key = (BASE / 'admin-key').read_text().strip()
+    threading.Thread(target=controller.idle_loop, daemon=True).start()
+    server.serve_forever()
+
+
+if __name__ == '__main__':
+    main()

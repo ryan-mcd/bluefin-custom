@@ -220,6 +220,8 @@ def main():
         # Validate caller-supplied values before creating the lock or changing services.
         validate(args.model, args.context, args.backend, 'model-only', '8080', '8643')
         run(['bluefin-agent-user', 'require'])
+        if active('bluefin-runtime-controller.service'):
+            raise RuntimeError('The AI platform controller owns runtime switching; use its control API.')
         directory = Path.home() / '.config/bluefin-ai'
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (directory / 'model-switch.lock').open('a') as lock:

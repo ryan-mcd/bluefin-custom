@@ -1,0 +1,19 @@
+[Unit]
+Description=Local AI runtime admission and lifecycle controller
+PartOf=bluefin-ai-platform.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+ExecStartPre=/usr/bin/bluefin-ai-memory verify
+ExecStart=/usr/bin/bluefin-runtime-controller
+ExecStopPost=/usr/bin/bluefin-ai-platform stop-runtimes
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=150
+UMask=0077
+NoNewPrivileges=true
+MemoryMax=512M
+
+[Install]
+WantedBy=bluefin-ai-platform.target

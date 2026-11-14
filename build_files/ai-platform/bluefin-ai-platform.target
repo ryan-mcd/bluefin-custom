@@ -1,0 +1,6 @@
+[Unit]
+Description=Bluefin Strix Halo AI platform
+Requires=bluefin-runtime-controller.service
+Wants=bluefin-platform-bifrost.service bluefin-platform-webui.service bluefin-platform-edge.service
+Upholds=bluefin-runtime-controller.service bluefin-platform-bifrost.service bluefin-platform-webui.service bluefin-platform-edge.service
+After=bluefin-runtime-controller.service

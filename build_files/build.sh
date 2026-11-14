@@ -118,6 +118,21 @@ done
 install -Dm0755 /ctx/bluefin-ai-firewall /usr/bin/bluefin-ai-firewall
 install -Dm0755 /ctx/bluefin-model-gateway /usr/bin/bluefin-model-gateway
 install -Dm0755 /ctx/bluefin-ramalama-quadlet-fix /usr/bin/bluefin-ramalama-quadlet-fix
+# Image-owned platform defaults; credentials, model blobs and container storage
+# are created only after boot. Do not run Podman or rpm-ostree kargs in this build.
+install -d /usr/share/bluefin-ai/platform /usr/lib/systemd/user
+install -m0644 /ctx/ai-platform/* /usr/share/bluefin-ai/platform/
+for executable in bluefin-ai-memory bluefin-ai-platform bluefin-ai-platform-boot bluefin-runtime-controller; do
+  install -Dm0755 "/ctx/ai-platform/$executable" "/usr/bin/$executable"
+done
+for unit in bluefin-ai-memory.service bluefin-ai-platform-boot.service; do
+  install -Dm0644 "/ctx/ai-platform/$unit" "/usr/lib/systemd/system/$unit"
+  systemctl enable "$unit"
+done
+for unit in bluefin-ai-platform.target bluefin-runtime-controller.service; do
+  install -Dm0644 "/ctx/ai-platform/$unit" "/usr/lib/systemd/user/$unit"
+done
+/usr/bin/bluefin-ai-platform validate --config /ctx/ai-platform/platform.json
 install -Dm0755 /ctx/bluefin-agent-user /usr/bin/bluefin-agent-user
 install -Dm0644 /ctx/bluefin-agent-user.service /usr/lib/systemd/system/bluefin-agent-user.service
 install -Dm0644 /ctx/openclaw-gateway.service /etc/systemd/user/openclaw-gateway.service

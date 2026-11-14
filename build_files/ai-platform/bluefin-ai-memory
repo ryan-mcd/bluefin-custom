@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Reconcile deployment-local TTM arguments on a validated Strix Halo host."""
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+GIB = 1024 ** 3
+TARGET = 110 * GIB
+KEYS = ('ttm.pages_limit', 'amdttm.pages_limit')
+STATE = Path('/var/lib/bluefin-ai/memory-before.json')
+
+
+def command(*args):
+    return subprocess.run(args, check=True, text=True, capture_output=True).stdout.strip()
+
+
+def plan(arguments, module, page_size):
+    if page_size != 4096:
+        raise ValueError('This release requires 4 KiB kernel pages')
+    desired = module + '.pages_limit=' + str(TARGET // page_size)
+    old = [arg for arg in arguments if arg.split('=', 1)[0] in KEYS]
+    # Do not silently undo independent administrator tuning.
+    for arg in arguments:
+        if arg.startswith(('ttm.page_pool_size=', 'amdttm.page_pool_size=')):
+            raise ValueError('Review/remove explicit page_pool_size tuning before automatic reconciliation')
+        if arg.startswith('amdgpu.gttsize=') and int(arg.split('=')[1]) < TARGET // (1024 ** 2):
+            raise ValueError('Existing amdgpu.gttsize is below 112640 MiB; review this deprecated override')
+    if old == [desired]:
+        return [], desired
+    return ['--delete=' + arg for arg in old] + ['--append=' + desired], desired
+
+
+def inspect():
+    devices = [d for d in Path('/sys/class/drm').glob('card[0-9]*/device')
+               if (d / 'vendor').exists() and (d / 'vendor').read_text().strip() == '0x1002'
+               and (d / 'device').read_text().strip() == '0x1586']
+    if len(devices) != 1:
+        return None  # Other Bluefin machines must not inherit a 110 GiB limit.
+    total = int(re.search(r'^MemTotal:\s+(\d+)', Path('/proc/meminfo').read_text(), re.M)[1]) * 1024
+    if total < TARGET + 12 * GIB:
+        raise ValueError('Need at least 122 GiB OS-visible RAM; check capacity and keep BIOS UMA small')
+    version = re.match(r'(\d+)\.(\d+)\.(\d+)', os.uname().release)
+    if not version or tuple(map(int, version.groups())) < (6, 18, 4):
+        raise ValueError('Require kernel >=6.18.4 on Bluefin (AMD KFD fixes); update image first')
+    modules = [m for m in ('ttm', 'amdttm') if Path('/sys/module', m, 'parameters/pages_limit').exists()]
+    if len(modules) != 1:
+        raise ValueError('Cannot unambiguously detect the loaded TTM pages_limit parameter')
+    module = modules[0]
+    effective = int(Path('/sys/module', module, 'parameters/pages_limit').read_text())
+    gtt = devices[0] / 'mem_info_gtt_total'
+    return dict(module=module, effective_pages=effective, target_pages=TARGET // os.sysconf('SC_PAGE_SIZE'),
+                gtt_bytes=int(gtt.read_text()) if gtt.exists() else None, mem_total_bytes=total)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('status', 'verify', 'apply', 'rollback'), default='status', nargs='?')
+    args = parser.parse_args()
+    try:
+        if args.action == 'rollback':
+            if os.geteuid() != 0:
+                raise ValueError('Run rollback as root')
+            saved = json.loads(STATE.read_text())
+            current = shlex.split(command('rpm-ostree', 'kargs'))
+            changes = ['--delete=' + a for a in current if a.split('=', 1)[0] in KEYS]
+            changes += ['--append=' + a for a in saved['previous']]
+            if changes:
+                command('rpm-ostree', 'kargs', *changes)
+            print('Previous TTM arguments staged. Disable memory service before reboot to retain rollback.')
+            return
+        info = inspect()
+        if info is None:
+            if args.action == 'verify':
+                raise ValueError('AI platform requires a supported Strix Halo GPU')
+            print('Skipped: not exactly one supported Strix Halo GPU (1002:1586)')
+            return
+        print(json.dumps(info, indent=2))
+        if args.action == 'status':
+            return
+        if args.action == 'verify':
+            if (info['effective_pages'] != info['target_pages'] or info['gtt_bytes'] is None or
+                    info['gtt_bytes'] < TARGET):
+                raise ValueError('110 GiB TTM/GTT is not effective; inspect memory service and reboot if staged')
+            return
+        if os.geteuid() != 0:
+            raise ValueError('Run apply as root')
+        current = shlex.split(command('rpm-ostree', 'kargs'))
+        changes, desired = plan(current, info['module'], os.sysconf('SC_PAGE_SIZE'))
+        if changes:
+            STATE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                fd = os.open(STATE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump({'previous': [a for a in current if a.split('=', 1)[0] in KEYS]}, stream)
+            command('rpm-ostree', 'kargs', *changes)
+            print('Staged ' + desired + '; reboot required. No automatic reboot will occur.')
+        elif info['effective_pages'] != info['target_pages']:
+            raise ValueError('Desired argument already staged but not effective; reboot, then inspect module/kernel')
+        elif info['gtt_bytes'] is None or info['gtt_bytes'] < TARGET:
+            raise ValueError('TTM limit applied but DRM GTT not verified at 110 GiB; validate kernel before serving')
+        else:
+            print('Verified TTM and DRM GTT limits; physical free memory remains a separate budget')
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, 'Memory reconciliation failed: ' + str(exc) + '\n')
+
+
+if __name__ == '__main__':
+    main()

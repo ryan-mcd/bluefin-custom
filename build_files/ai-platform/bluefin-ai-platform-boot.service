@@ -1,0 +1,14 @@
+[Unit]
+Description=Provision the image-defined rootless AI platform
+Requires=bluefin-agent-user.service
+Wants=network-online.target bluefin-ai-memory.service
+After=bluefin-agent-user.service bluefin-ai-memory.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bluefin-ai-platform-boot
+TimeoutStartSec=3600
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

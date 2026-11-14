@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+config=/usr/share/bluefin-ai/platform/platform.json
+[[ ! -f /etc/bluefin-ai/platform.json ]] || config=/etc/bluefin-ai/platform.json
+/usr/bin/bluefin-ai-platform validate --config "$config"
+jq -e '.enabled == true' "$config" >/dev/null || exit 0
+agent_user="$(bluefin-agent-user name)"
+agent_uid="$(id -u "$agent_user")"
+loginctl enable-linger "$agent_user"
+systemctl start "user@${agent_uid}.service"
+exec runuser -u "$agent_user" -- env \
+  XDG_RUNTIME_DIR="/run/user/${agent_uid}" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${agent_uid}/bus" \
+  /usr/bin/bluefin-ai-platform provision

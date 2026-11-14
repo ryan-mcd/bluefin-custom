@@ -1,0 +1,13 @@
+[Unit]
+Description=Reconcile 110 GiB TTM limit on supported Strix Halo hardware
+After=local-fs.target rpm-ostreed.service
+ConditionPathExists=/run/ostree-booted
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bluefin-ai-memory apply
+TimeoutStartSec=180
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

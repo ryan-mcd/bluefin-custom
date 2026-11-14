@@ -1,0 +1,30 @@
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/stderr warn;
+events { worker_connections 64; }
+http {
+    map_hash_bucket_size 128;
+    access_log off;
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path /tmp/proxy;
+    map $http_authorization $authorized {
+        default 0;
+        "Bearer @@CLIENT_KEY@@" 1;
+    }
+    server {
+        listen 127.0.0.1:8643;
+        client_max_body_size 4m;
+        if ($authorized = 0) { return 401; }
+        location = /v1/models { proxy_pass http://127.0.0.1:18101; }
+        location = /v1/chat/completions { proxy_pass http://127.0.0.1:18101; }
+        location = /v1/completions { proxy_pass http://127.0.0.1:18101; }
+        location / { return 404; }
+        proxy_set_header Host 127.0.0.1:18101;
+        proxy_set_header Authorization "";
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering on;
+        proxy_read_timeout 1800s;
+        proxy_next_upstream off;
+    }
+}

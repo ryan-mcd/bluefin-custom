@@ -1,0 +1,22 @@
+[Unit]
+Description=Bifrost local AI gateway
+Requires=bluefin-runtime-controller.service
+After=bluefin-runtime-controller.service
+PartOf=bluefin-ai-platform.target
+
+[Container]
+Image=@@IMAGE@@
+ContainerName=bluefin-platform-bifrost
+User=0
+Network=host
+Environment=APP_HOST=127.0.0.1 APP_PORT=18101
+EnvironmentFile=%h/.config/bluefin-ai/platform/bifrost.env
+Volume=%h/.config/bluefin-ai/platform/bifrost.json:/app/data/config.json:ro,Z
+DropCapability=all
+NoNewPrivileges=true
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+MemoryMax=2G

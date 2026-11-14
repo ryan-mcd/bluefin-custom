@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "images": {"bifrost": null, "webui": null, "edge": null},
+  "reserve_gib": 16,
+  "max_inflight": 2,
+  "startup_seconds": 900,
+  "drain_seconds": 120,
+  "idle_seconds": 900,
+  "profiles": {},
+  "aliases": {}
+}

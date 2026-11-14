@@ -38,6 +38,8 @@ ENV BLUEFIN_AGENT_ENABLE_LINGER=${BLUEFIN_AGENT_ENABLE_LINGER}
 # RUN rm /opt && mkdir /opt
 
 ### MODIFICATIONS
+# build.sh also installs /ctx/ai-platform: declarative rootless AI services,
+# first-boot provisioning and hardware-gated 110 GiB TTM reconciliation.
 ## make modifications desired in your image and install packages by modifying the build.sh script
 ## the following RUN directive does all the things required to run "build.sh" as recommended.
 

@@ -1,0 +1,26 @@
+[Unit]
+Description=Open WebUI for the local AI platform
+Requires=bluefin-platform-bifrost.service
+After=bluefin-platform-bifrost.service
+PartOf=bluefin-ai-platform.target
+
+[Container]
+Image=@@IMAGE@@
+ContainerName=bluefin-platform-webui
+User=0
+Network=host
+Environment=HOST=127.0.0.1 PORT=3000
+Environment=ENABLE_OLLAMA_API=false ENABLE_OPENAI_API=true
+Environment=OPENAI_API_BASE_URL=http://127.0.0.1:18101/v1
+Environment=OPENAI_API_KEY=local-only
+Environment=ENABLE_PERSISTENT_CONFIG=false ENABLE_SIGNUP=false
+EnvironmentFile=%h/.config/bluefin-ai/platform/webui.env
+Volume=bluefin-platform-webui:/app/backend/data
+DropCapability=all
+NoNewPrivileges=true
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+MemoryMax=4G
