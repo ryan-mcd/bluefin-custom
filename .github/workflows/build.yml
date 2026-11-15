@@ -58,7 +58,7 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck python3-venv
+          sudo apt-get install -y shellcheck python3-venv podman skopeo
           python3 -m venv /tmp/bluefin-sast
           /tmp/bluefin-sast/bin/pip install rust-just==1.59.0 bandit==1.8.6
           echo "/tmp/bluefin-sast/bin" >> "$GITHUB_PATH"
@@ -84,7 +84,7 @@ jobs:
             build_files/ai-platform/bluefin-ai-platform build_files/ai-platform/bluefin-runtime-controller
           python3 build_files/ai-platform/bluefin-ai-platform validate --config build_files/ai-platform/platform.json
 
-      - name: Security checks
+      - name: ShellCheck security checks
         run: |
           shellcheck --severity=warning --exclude=SC1090,SC1091 \
             build_files/build.sh build_files/dx-layer.sh \
@@ -93,10 +93,32 @@ jobs:
             build_files/bluefin-ai-profile build_files/bluefin-ai-firewall \
             build_files/bluefin-strata-service-enable \
             build_files/bluefin-model-gateway build_files/bluefin-dx-groups \
-            build_files/bluefin-ramalama-quadlet-fix
-          /tmp/bluefin-sast/bin/bandit -ll build_files/bluefin-ai-dashboard
-          shellcheck --severity=warning build_files/ai-platform/bluefin-ai-platform-boot
+            build_files/bluefin-ramalama-quadlet-fix \
+            build_files/ai-platform/bluefin-ai-platform-boot
+
+      - name: Bandit security scan
+        run: /tmp/bluefin-sast/bin/bandit -ll build_files/bluefin-ai-dashboard
+
+      - name: Unit and integration tests
+        run: |
+          python3 --version
+          podman --version
           python3 -B -m unittest discover -s tests -v
+
+      - name: Verify pinned platform images
+        run: |
+          python3 build_files/ai-platform/bluefin-ai-platform images \
+            --config build_files/ai-platform/platform.json > /tmp/bluefin-platform-images.json
+          while IFS=$'\t' read -r component image; do
+            echo "::group::Verify ${component} (${image})"
+            # Retain the tag for Dependabot, but use a digest-only transport reference.
+            repository_tag=${image%@*}
+            reference="${repository_tag%:*}@${image##*@}"
+            skopeo inspect --no-tags --override-os linux --override-arch amd64 "docker://${reference}" \
+              > /tmp/bluefin-platform-image.json
+            jq -e '.Os == "linux" and .Architecture == "amd64"' /tmp/bluefin-platform-image.json
+            echo "::endgroup::"
+          done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' /tmp/bluefin-platform-images.json)
 
       - name: Get current date
         id: date

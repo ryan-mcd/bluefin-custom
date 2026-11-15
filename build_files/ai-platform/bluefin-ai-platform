@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -18,15 +20,147 @@ ASSETS = Path('/usr/share/bluefin-ai/platform')
 BASE = Path.home() / '.config/bluefin-ai/platform'
 LEGACY = ('bluefin-ramalama.service', 'bluefin-strata.service', 'bluefin-strata-proxy.service',
           'bluefin-model-gateway.service')
+COMPONENTS = frozenset(('bifrost', 'webui', 'edge', 'llamacpp', 'ramalama', 'strata', 'vllm'))
+SERVICES = ('bluefin-runtime-controller.service', 'bluefin-platform-bifrost.service',
+            'bluefin-platform-webui.service', 'bluefin-platform-edge.service')
 
 
-def run(*args):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=1800)
+def run(*args, timeout=1800):
+    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout)
+
+
+def active(unit):
+    result = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', unit],
+                            check=False, capture_output=True, text=True, timeout=15)
+    if result.returncode not in (0, 3, 4):
+        raise RuntimeError('Cannot inspect user service ' + unit + ': ' + result.stderr.strip())
+    return result.returncode == 0
+
+
+def ensure_images(config):
+    """Immutable cached images support offline boots; pull only missing digests."""
+    images = list(config['images'].values()) + [p['image'] for p in config['profiles'].values()]
+    for image in dict.fromkeys(images):
+        result = subprocess.run(['podman', 'image', 'exists', image], check=False,
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode == 1:
+            run('podman', 'pull', image)
+        elif result.returncode != 0:
+            raise RuntimeError('Cannot inspect cached image ' + image + ': ' + result.stderr.strip())
+
+
+def probe(port, path, credential=None):
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+    try:
+        headers = {'Authorization': 'Bearer ' + credential} if credential else {}
+        connection.request('GET', path, headers=headers)
+        response = connection.getresponse()
+        body = response.read(1024 * 1024 + 1)
+        if len(body) > 1024 * 1024:
+            raise RuntimeError('Oversized readiness response from ' + str(port))
+        return response.status, body
+    finally:
+        connection.close()
+
+
+def verify_platform(config, timeout=180):
+    """A started unit alone does not prove the desired images or APIs are ready."""
+    expected = {}
+    for name in ('bifrost', 'webui', 'edge'):
+        try:
+            metadata = json.loads(run('podman', 'image', 'inspect', config['images'][name], timeout=15).stdout)
+            image_id = metadata[0]['Id']
+            if not isinstance(image_id, str) or not re.fullmatch(r'(sha256:)?[0-9a-f]{64}', image_id):
+                raise ValueError('Invalid image ID')
+            expected['bluefin-platform-' + name] = image_id.removeprefix('sha256:')
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError('Invalid cached image metadata for ' + name) from exc
+    admin_key, client_key = key('admin-key'), key('client-key')
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            containers = json.loads(run('podman', 'container', 'inspect', *expected, timeout=15).stdout)
+            actual = {entry['Name'].lstrip('/'): entry for entry in containers}
+            for name, image_id in expected.items():
+                container = actual.get(name, {})
+                if (not container.get('State', {}).get('Running') or
+                        container.get('Image', '').removeprefix('sha256:') != image_id):
+                    raise RuntimeError(name + ' is not running its configured image; stop the target before repair')
+            status, body = probe(18100, '/control/status', admin_key)
+            if status != 200 or json.loads(body).get('state') not in ('idle', 'ready', 'starting', 'draining', 'stopping'):
+                raise RuntimeError('Runtime controller is not ready')
+            status, body = probe(3000, '/health')
+            if status != 200 or json.loads(body).get('status') is not True:
+                raise RuntimeError('Open WebUI health check failed')
+            status, body = probe(18101, '/v1/models')
+            if status != 200 or not json.loads(body).get('data'):
+                raise RuntimeError('Bifrost model listing failed')
+            status, _ = probe(8643, '/v1/models')
+            if status != 401:
+                raise RuntimeError('Inference gateway did not require authentication')
+            status, body = probe(8643, '/v1/models', client_key)
+            if status != 200 or not json.loads(body).get('data'):
+                raise RuntimeError('Authenticated inference gateway model listing failed')
+            return
+        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError, RuntimeError,
+                http.client.HTTPException, subprocess.SubprocessError) as exc:
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Platform readiness failed: ' + str(exc)) from exc
+            time.sleep(2)
 
 
 def load():
     override = Path('/etc/bluefin-ai/platform.json')
-    return json.loads((override if override.exists() else ASSETS / 'platform.json').read_text())
+    return resolve_images(json.loads((override if override.exists() else ASSETS / 'platform.json').read_text()))
+
+
+def image_catalog(manifest=None):
+    """Read the dependency bot's Dockerfile without executing build instructions."""
+    manifest = manifest or ASSETS / 'Dockerfile'
+    images = {}
+    for number, line in enumerate(manifest.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        match = re.fullmatch(r'FROM ([a-z0-9./:_-]+@sha256:[0-9a-f]{64}) AS ([a-z][a-z0-9-]*)', line)
+        if not match or match[2] in images or ':' not in match[1].split('@')[0].rsplit('/', 1)[-1]:
+            raise ValueError(f'Invalid or duplicate image declaration at {manifest}:{number}')
+        images[match[2]] = match[1]
+    if set(images) != COMPONENTS:
+        raise ValueError('Image catalog must define exactly: ' + ', '.join(sorted(COMPONENTS)))
+    return images
+
+
+def podman_reference(image):
+    """containers/image on older hosts accepts digest-only, not tag@digest."""
+    if not isinstance(image, str) or '@sha256:' not in image:
+        return image
+    repository, checksum = image.split('@', 1)
+    if ':' in repository.rsplit('/', 1)[-1]:
+        repository = repository.rsplit(':', 1)[0]
+    return repository + '@' + checksum
+
+
+def resolve_images(config, manifest=None):
+    """Resolve image:<component> using the single Dependabot-managed catalog."""
+    catalog = None
+
+    def resolve(value):
+        nonlocal catalog
+        if isinstance(value, str) and value.startswith('image:'):
+            if catalog is None:
+                catalog = image_catalog(manifest)
+            name = value.removeprefix('image:')
+            if name not in catalog:
+                raise ValueError('Unknown image catalog component: ' + name)
+            return podman_reference(catalog[name])
+        return podman_reference(value)
+
+    result = dict(config)
+    result['images'] = {name: resolve(value) for name, value in config.get('images', {}).items()}
+    result['profiles'] = {name: dict(profile, image=resolve(profile['image']))
+                          for name, profile in config.get('profiles', {}).items()}
+    return result
 
 
 def scalar(value):
@@ -200,8 +334,7 @@ def provision(config):
     run('bluefin-agent-user', 'require')
     run('bluefin-ai-memory', 'verify')
     for unit in LEGACY:
-        active = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', unit], check=False)
-        if active.returncode == 0:
+        if active(unit):
             raise ValueError('Disable legacy AI profile before enabling the platform: ' + unit)
     fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode())
     for path in sorted(ASSETS.iterdir()):
@@ -209,22 +342,24 @@ def provision(config):
             fingerprint.update(path.name.encode())
             fingerprint.update(path.read_bytes())
     release = fingerprint.hexdigest()
-    if (BASE / 'release').exists() and (BASE / 'release').read_text().strip() == release:
-        run('systemctl', '--user', 'start', 'bluefin-ai-platform.target')
-        print('Existing platform release reconciled; use service status to verify health')
-        return
+    unchanged = (BASE / 'release').exists() and (BASE / 'release').read_text().strip() == release
     # Only a stopped platform can be reconciled. Prevent mixed old/new releases.
-    if subprocess.run(['systemctl', '--user', 'is-active', '--quiet',
-                       'bluefin-ai-platform.target'], check=False).returncode == 0:
-        raise ValueError('Stop bluefin-ai-platform.target before reprovisioning')
+    if active('bluefin-ai-platform.target'):
+        if not unchanged:
+            raise ValueError('Stop bluefin-ai-platform.target before reprovisioning')
+        verify_platform(config)
+        print('Current platform release is running with verified images and API health')
+        return
+    for unit in SERVICES:
+        if active(unit):
+            raise ValueError('Managed service is running outside its target; stop it before repair: ' + unit)
     models = Path.home() / '.local/share/bluefin-ai/models'
-    for profile in config['profiles'].values():
-        for artifact in profile['artifacts']:
-            model_artifact(models, artifact)
+    if not unchanged:
+        for profile in config['profiles'].values():
+            for artifact in profile['artifacts']:
+                model_artifact(models, artifact)
     # Network access and mutable Podman storage belong to deployment, not build.sh.
-    images = list(config['images'].values()) + [p['image'] for p in config['profiles'].values()]
-    for image in dict.fromkeys(images):
-        run('podman', 'pull', image)
+    ensure_images(config)
     BASE.mkdir(mode=0o700, parents=True, exist_ok=True)
     inference, client = key('inference-key'), key('client-key')
     key('admin-key')
@@ -247,18 +382,33 @@ def provision(config):
     for name, profile in config['profiles'].items():
         write(quadlets / ('bluefin-runtime-' + name + '.container'), runtime_quadlet(name, profile))
     run('systemctl', '--user', 'daemon-reload')
-    run('systemctl', '--user', 'start', 'bluefin-ai-platform.target')
+    run('systemctl', '--user', 'reset-failed', *SERVICES)
+    try:
+        run('systemctl', '--user', 'start', 'bluefin-ai-platform.target')
+        verify_platform(config)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        try:
+            run('systemctl', '--user', 'stop', 'bluefin-ai-platform.target')
+        except (OSError, subprocess.SubprocessError) as cleanup:
+            raise RuntimeError('Startup failed and target cleanup failed: ' + str(cleanup)) from exc
+        raise
     write(BASE / 'release', release + '\n')
-    print('Platform started; inspect all service health before declaring ready. Credentials are private files in ' + str(BASE))
+    print('Platform reconciled: desired container images, WebUI and APIs verified. Private credentials: ' + str(BASE))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('validate', 'provision', 'stop-runtimes'))
+    parser.add_argument('action', choices=('validate', 'images', 'provision', 'stop-runtimes'))
     parser.add_argument('--config', type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     try:
+        manifest = ASSETS / 'Dockerfile'
+        if args.config and (args.config.parent / 'Dockerfile').is_file():
+            manifest = args.config.parent / 'Dockerfile'
+        if args.action == 'images':
+            print(json.dumps(image_catalog(manifest), indent=2))
+            return
         if args.action == 'stop-runtimes':
             config = json.loads((BASE / 'controller.json').read_text())
             for name in config['profiles']:
@@ -266,7 +416,8 @@ def main():
                     raise ValueError('Invalid profile name')
                 run('systemctl', '--user', 'stop', 'bluefin-runtime-' + name + '.service')
             return
-        config = validate(json.loads(args.config.read_text()) if args.config else load())
+        config = validate(resolve_images(json.loads(args.config.read_text()), manifest)
+                          if args.config else load())
         if args.action == 'validate':
             print('Valid platform configuration; enabled=' + str(config['enabled']))
         else:
@@ -278,7 +429,7 @@ def main():
                     provision(config)
             else:
                 provision(config)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
         parser.exit(1, 'AI platform: ' + str(exc) + '\n')
 
 

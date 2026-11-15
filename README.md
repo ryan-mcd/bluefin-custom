@@ -6,8 +6,10 @@ The image now includes a hardware-gated 110 GiB TTM reconciler and an opt-in
 Bifrost/Open WebUI platform with a rootless runtime admission controller.
 See [the repo-specific architecture and deployment contract](../bluefin-custom-docs/docs/STRIX-HALO-PLATFORM.md)
 for build/boot ownership, migration from the existing manual profiles, release
-qualification, API and rollback. Runtime activation stays disabled until the
-image manifest specifies approved container digests and verified model files.
+qualification, API and rollback. Container versions are pinned in the
+[Dependabot-managed image catalog](build_files/ai-platform/Dockerfile); update PRs
+run the normal CI checks and verify Linux amd64 image availability. Runtime
+activation stays disabled pending a configured, verified model profile.
 
 Custom Bluefin image for a Framework Desktop used to run OpenClaw, Hermes,
 local LLM services, and adjacent agent workflows with conservative supply-chain

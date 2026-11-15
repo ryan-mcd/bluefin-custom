@@ -9,3 +9,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # These FROM declarations are also the application's image source of truth.
+  - package-ecosystem: "docker"
+    directory: "/build_files/ai-platform"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(platform)"

@@ -7,6 +7,12 @@
   "rebaseWhen": "never",
 
   "packageRules": [
+    // Dependabot owns this catalog; avoid duplicate update PRs from two bots.
+    {
+      "enabled": false,
+      "matchManagers": ["dockerfile"],
+      "matchFileNames": ["build_files/ai-platform/Dockerfile"],
+    },
     {
       "automerge": true,
       "matchUpdateTypes": ["pin", "pinDigest"]

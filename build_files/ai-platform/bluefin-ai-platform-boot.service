@@ -1,12 +1,17 @@
 [Unit]
-Description=Provision the image-defined rootless AI platform
+Description=Reconcile the image-defined rootless AI platform at boot
 Requires=bluefin-agent-user.service
 Wants=network-online.target bluefin-ai-memory.service
 After=bluefin-agent-user.service bluefin-ai-memory.service network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/bin/bluefin-ai-platform-boot
+Restart=on-failure
+RestartSec=60
 TimeoutStartSec=3600
 UMask=0077
 
