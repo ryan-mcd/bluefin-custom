@@ -32,7 +32,7 @@ class HTTPTest(unittest.TestCase):
         config['profiles']['small']['port'] = self.backend.server_port
         self.events = []
         self.controller = runtime.Controller(config, manage=lambda *a: self.events.append(a),
-                                             memory=lambda: 120 * runtime.GIB, health=lambda p: True)
+                                             memory=lambda: 120 * runtime.GIB, health=lambda p: True, preflight=lambda p: None)
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), runtime.Handler)
         self.server.controller = self.controller
         self.server.inference_key = 'inference-secret'

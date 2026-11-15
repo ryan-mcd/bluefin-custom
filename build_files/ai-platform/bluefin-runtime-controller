@@ -33,6 +33,25 @@ def available():
     raise RuntimeError('MemAvailable is unavailable')
 
 
+def runtime_preflight(profile):
+    models = Path.home() / '.local/share/bluefin-ai/models'
+    for artifact in profile.get('artifacts', []):
+        path = models / artifact['name']
+        if not path.is_file() or path.stat().st_size != artifact['bytes']:
+            raise Rejected(503, 'Model preparation is pending; inspect bluefin-ai-models.service')
+    try:
+        prepared = subprocess.run(['systemctl', '--user', 'show', 'bluefin-ai-models.service',
+                                   '--property=SubState', '--value'],
+                                  capture_output=True, text=True, timeout=15)
+        if prepared.returncode or prepared.stdout.strip() != 'exited':
+            raise Rejected(503, 'Model preparation is pending or failed; inspect bluefin-ai-models.service')
+        result = subprocess.run(['bluefin-ai-memory', 'verify'], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Rejected(503, 'Cannot verify GPU readiness: ' + str(exc)) from exc
+    if result.returncode:
+        raise Rejected(503, 'GPU memory is not ready; WebUI remains available. ' + result.stderr.strip()[:600])
+
+
 def ready(profile):
     connection = http.client.HTTPConnection('127.0.0.1', profile['port'], timeout=2)
     try:
@@ -49,9 +68,10 @@ def ready(profile):
 
 
 class Controller:
-    def __init__(self, config, manage=systemctl, memory=available, health=ready):
+    def __init__(self, config, manage=systemctl, memory=available, health=ready, preflight=runtime_preflight):
         self.config, self.profiles = config, config['profiles']
         self.manage, self.memory, self.health = manage, memory, health
+        self.preflight = preflight
         self.condition = threading.Condition()
         self.current = self.pin = None
         self.inflight = 0
@@ -81,6 +101,7 @@ class Controller:
 
     def start(self, name):
         p = self.profiles[name]
+        self.preflight(p)
         if self.memory() < (p['resident_gib'] + self.config['reserve_gib']) * GIB:
             raise Rejected(507, 'Insufficient host memory for weights, KV cache and runtime overhead')
         self.manage('reset-failed', 'bluefin-runtime-' + name + '.service')

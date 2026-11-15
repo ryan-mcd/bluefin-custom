@@ -11,6 +11,7 @@ User=0
 Network=host
 Environment=APP_HOST=127.0.0.1 APP_PORT=18101
 EnvironmentFile=%h/.config/bluefin-ai/platform/bifrost.env
+Volume=bluefin-bifrost-data:/app/data
 Volume=%h/.config/bluefin-ai/platform/bifrost.json:/app/data/config.json:ro,Z
 DropCapability=all
 NoNewPrivileges=true

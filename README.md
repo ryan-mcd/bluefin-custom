@@ -2,14 +2,24 @@
 
 ## Strix Halo image platform
 
-The image now includes a hardware-gated 110 GiB TTM reconciler and an opt-in
+The image now includes a hardware-gated 110 GiB TTM reconciler and an enabled-by-default
 Bifrost/Open WebUI platform with a rootless runtime admission controller.
 See [the repo-specific architecture and deployment contract](../bluefin-custom-docs/docs/STRIX-HALO-PLATFORM.md)
 for build/boot ownership, migration from the existing manual profiles, release
 qualification, API and rollback. Container versions are pinned in the
 [Dependabot-managed image catalog](build_files/ai-platform/Dockerfile); update PRs
-run the normal CI checks and verify Linux amd64 image availability. Runtime
-activation stays disabled pending a configured, verified model profile.
+run the normal CI checks and verify Linux amd64 image availability. Boot creates
+and starts the platform under the configured agent account. A separate service
+prepares a checksum-verified Qwen3 0.6B starter model; GPU readiness gates model
+activation while WebUI remains available at `http://127.0.0.1:3000` on the host.
+
+After deploying and rebooting, inspect the correct rootless account from an
+admin shell with `sudo bluefin-ai-platform status`. If startup fails, inspect
+`sudo journalctl -b -u bluefin-ai-platform-boot.service --no-pager -n 100`.
+The initial local WebUI login is `admin@example.com`; its generated password is
+stored in the agent account's private
+`~/.config/bluefin-ai/platform/webui-admin-password` file. An existing
+`/etc/bluefin-ai/platform.json` remains authoritative over the image defaults.
 
 Custom Bluefin image for a Framework Desktop used to run OpenClaw, Hermes,
 local LLM services, and adjacent agent workflows with conservative supply-chain

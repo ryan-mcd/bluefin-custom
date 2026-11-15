@@ -6,6 +6,7 @@ import hashlib
 import http.client
 import json
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -37,9 +38,11 @@ def active(unit):
     return result.returncode == 0
 
 
-def ensure_images(config):
+def ensure_images(config, *, runtimes=True):
     """Immutable cached images support offline boots; pull only missing digests."""
-    images = list(config['images'].values()) + [p['image'] for p in config['profiles'].values()]
+    images = list(config['images'].values())
+    if runtimes:
+        images += [p['image'] for p in config['profiles'].values()]
     for image in dict.fromkeys(images):
         result = subprocess.run(['podman', 'image', 'exists', image], check=False,
                                 capture_output=True, text=True, timeout=30)
@@ -332,7 +335,6 @@ def provision(config):
         print('AI platform disabled in image release configuration')
         return
     run('bluefin-agent-user', 'require')
-    run('bluefin-ai-memory', 'verify')
     for unit in LEGACY:
         if active(unit):
             raise ValueError('Disable legacy AI profile before enabling the platform: ' + unit)
@@ -353,20 +355,16 @@ def provision(config):
     for unit in SERVICES:
         if active(unit):
             raise ValueError('Managed service is running outside its target; stop it before repair: ' + unit)
-    models = Path.home() / '.local/share/bluefin-ai/models'
-    if not unchanged:
-        for profile in config['profiles'].values():
-            for artifact in profile['artifacts']:
-                model_artifact(models, artifact)
-    # Network access and mutable Podman storage belong to deployment, not build.sh.
-    ensure_images(config)
+    # The UI/control plane must not wait on GPU tuning or model downloads.
+    # A separate user service prepares models and engine images after startup.
+    ensure_images(config, runtimes=False)
     BASE.mkdir(mode=0o700, parents=True, exist_ok=True)
     inference, client = key('inference-key'), key('client-key')
     key('admin-key')
     webui_secret, admin_password = key('webui-secret'), key('webui-admin-password')
     write(BASE / 'bifrost.env', 'CONTROLLER_API_KEY=' + inference + '\n')
     write(BASE / 'engine.env', 'VLLM_API_KEY=' + inference + '\n')
-    write(BASE / 'webui.env', 'WEBUI_SECRET_KEY=' + webui_secret + '\nWEBUI_ADMIN_EMAIL=admin@localhost\n'
+    write(BASE / 'webui.env', 'WEBUI_SECRET_KEY=' + webui_secret + '\nWEBUI_ADMIN_EMAIL=admin@example.com\n'
           'WEBUI_ADMIN_PASSWORD=' + admin_password + '\n')
     write(BASE / 'bifrost.json', (ASSETS / 'bifrost.json').read_text())
     write(BASE / 'nginx.conf', (ASSETS / 'nginx.conf.in').read_text().replace('@@CLIENT_KEY@@', client))
@@ -396,13 +394,59 @@ def provision(config):
     print('Platform reconciled: desired container images, WebUI and APIs verified. Private credentials: ' + str(BASE))
 
 
+def prepare_models():
+    run('bluefin-agent-user', 'require')
+    config = validate(json.loads((BASE / 'controller.json').read_text()))
+    models = Path.home() / '.local/share/bluefin-ai/models'
+    for profile in config['profiles'].values():
+        for artifact in profile['artifacts']:
+            model_artifact(models, artifact)
+    ensure_images({'images': {}, 'profiles': config['profiles']})
+    print('Configured model artifacts verified and runtime images available')
+
+
+def show_status():
+    """Rootless containers must be inspected in their owner's user manager."""
+    config_path = Path('/etc/bluefin-ai/platform.json')
+    if not config_path.exists():
+        config_path = ASSETS / 'platform.json'
+    print('Effective configuration: ' + str(config_path), flush=True)
+    print('Enabled: ' + str(json.loads(config_path.read_text()).get('enabled')), flush=True)
+    name = run('bluefin-agent-user', 'name').stdout.strip()
+    uid = pwd.getpwnam(name).pw_uid
+    print('Rootless service account: ' + name, flush=True)
+    if os.geteuid() == 0:
+        subprocess.run(['systemctl', '--no-pager', '--full', 'status',
+                        'bluefin-ai-platform-boot.service', 'bluefin-ai-memory.service'], check=False)
+        prefix = ['runuser', '-u', name, '--', 'env']
+    elif os.getuid() == uid:
+        prefix = ['env']
+    else:
+        print('Use sudo bluefin-ai-platform status to inspect that account.')
+        return
+    prefix += ['XDG_RUNTIME_DIR=/run/user/' + str(uid),
+               'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + str(uid) + '/bus']
+    subprocess.run(prefix + ['systemctl', '--user', '--no-pager', '--full', 'status',
+                             *SERVICES, 'bluefin-ai-models.service'], check=False)
+    subprocess.run(prefix + ['podman', 'ps', '-a'], check=False)
+    print('Configured WebUI address on the Bluefin host: http://127.0.0.1:3000')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('validate', 'images', 'provision', 'stop-runtimes'))
+    parser.add_argument('action', choices=('validate', 'images', 'status', 'provision', 'prepare-models', 'stop-runtimes'))
     parser.add_argument('--config', type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     try:
+        if args.action == 'status':
+            show_status()
+            return
+        if args.action == 'prepare-models':
+            with (BASE / 'models.lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                prepare_models()
+            return
         manifest = ASSETS / 'Dockerfile'
         if args.config and (args.config.parent / 'Dockerfile').is_file():
             manifest = args.config.parent / 'Dockerfile'

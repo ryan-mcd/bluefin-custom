@@ -43,7 +43,7 @@ class BootProvisionTests(unittest.TestCase):
         self.health.side_effect = ready
         platform.provision(self.config)
         self.assertTrue((self.base / 'release').exists())
-        self.images.assert_called_once_with(self.config)
+        self.images.assert_called_once_with(self.config, runtimes=False)
 
     def test_unchanged_release_repairs_quadlets_and_preserves_credentials_on_next_boot(self):
         platform.provision(self.config)

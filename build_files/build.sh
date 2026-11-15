@@ -132,7 +132,7 @@ for unit in bluefin-ai-memory.service bluefin-ai-platform-boot.service; do
   install -Dm0644 "/ctx/ai-platform/$unit" "/usr/lib/systemd/system/$unit"
   systemctl enable "$unit"
 done
-for unit in bluefin-ai-platform.target bluefin-runtime-controller.service; do
+for unit in bluefin-ai-platform.target bluefin-runtime-controller.service bluefin-ai-models.service; do
   install -Dm0644 "/ctx/ai-platform/$unit" "/usr/lib/systemd/user/$unit"
 done
 /usr/bin/bluefin-ai-platform validate --config /ctx/ai-platform/platform.json

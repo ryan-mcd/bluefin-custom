@@ -1,0 +1,15 @@
+[Unit]
+Description=Prepare verified local AI models and runtime images
+After=bluefin-runtime-controller.service
+PartOf=bluefin-ai-platform.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=exec
+RemainAfterExit=yes
+ExecStart=/usr/bin/bluefin-ai-platform prepare-models
+Restart=on-failure
+RestartSec=60
+TimeoutStopSec=30
+UMask=0077

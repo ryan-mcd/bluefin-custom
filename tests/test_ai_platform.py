@@ -47,7 +47,7 @@ class LifecycleTest(unittest.TestCase):
     def setUp(self):
         self.events = []
         self.controller = runtime.Controller(configuration(), manage=lambda *a: self.events.append(a),
-                                             memory=lambda: 120 * runtime.GIB, health=lambda p: True)
+                                             memory=lambda: 120 * runtime.GIB, health=lambda p: True, preflight=lambda p: None)
 
     def test_automatic_activation_and_alias_translation(self):
         with self.controller.lease('general') as p:
@@ -184,8 +184,13 @@ class LifecycleTest(unittest.TestCase):
 
 
 class ReleaseTest(unittest.TestCase):
-    def test_shipped_release_is_disabled(self):
-        self.assertFalse(platform.validate(json.loads((ASSETS / 'platform.json').read_text()))['enabled'])
+    def test_shipped_release_is_enabled_and_has_a_verified_starter(self):
+        config = platform.resolve_images(json.loads((ASSETS / 'platform.json').read_text()), ASSETS / 'Dockerfile')
+        self.assertTrue(platform.validate(config)['enabled'])
+        self.assertEqual(config['aliases']['general'], 'starter')
+        artifact = config['profiles']['starter']['artifacts'][0]
+        self.assertEqual(len(artifact['sha256']), 64)
+        self.assertGreater(artifact['bytes'], 0)
 
     def test_enabled_release_requires_pins_models_and_safe_strings(self):
         config = configuration()
