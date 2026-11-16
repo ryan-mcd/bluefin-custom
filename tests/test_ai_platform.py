@@ -31,8 +31,11 @@ memory = load('bluefin-ai-memory')
 def configuration():
     config = json.loads((ASSETS / 'platform.json').read_text())
     config['enabled'] = True
+    config.pop('prepare_on_boot', None)
+    config.pop('webui_aliases', None)
     image = 'registry.example.test/test@sha256:' + 'a' * 64
     config['images'] = dict.fromkeys(('bifrost', 'webui', 'edge'), image)
+    config['runtime_images'] = dict.fromkeys(('ramalama','llamacpp','strata','vllm'), image)
     config['profiles'] = {
         name: dict(engine='llamacpp', image=image, backend_model=name, resident_gib=8,
                    accelerator='vulkan', requires_key=False, port=18110 + n,
@@ -184,13 +187,12 @@ class LifecycleTest(unittest.TestCase):
 
 
 class ReleaseTest(unittest.TestCase):
-    def test_shipped_release_is_enabled_and_has_a_verified_starter(self):
+    def test_shipped_release_is_enabled_without_a_model_or_default_quantization(self):
         config = platform.resolve_images(json.loads((ASSETS / 'platform.json').read_text()), ASSETS / 'Dockerfile')
         self.assertTrue(platform.validate(config)['enabled'])
-        self.assertEqual(config['aliases']['general'], 'starter')
-        artifact = config['profiles']['starter']['artifacts'][0]
-        self.assertEqual(len(artifact['sha256']), 64)
-        self.assertGreater(artifact['bytes'], 0)
+        self.assertIsNone(config['aliases']['general'])
+        self.assertEqual(config['profiles'], {})
+        self.assertEqual(set(config['runtime_images']), {'ramalama','llamacpp','strata','vllm'})
 
     def test_enabled_release_requires_pins_models_and_safe_strings(self):
         config = configuration()

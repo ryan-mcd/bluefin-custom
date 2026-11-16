@@ -1,16 +1,27 @@
-#!/usr/bin/env python3
+#!/usr/lib/bluefin-ai/huggingface/bin/python3
 """Single-resident runtime controller and streaming admission proxy (loopback only)."""
 import contextlib
 import fcntl
 import hmac
+import hashlib
 import http.client
 import json
 import os
 import subprocess
 import threading
 import time
+import sys
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+# Source checkouts and the installed OS use the same image-owned library.
+_module_dir = Path(__file__).parent
+if not (_module_dir / 'bluefin_ai_models.py').is_file():
+    _module_dir = Path('/usr/share/bluefin-ai/platform')
+sys.path.insert(0, str(_module_dir))
+from bluefin_ai_models import artifact_ready, same_model, selected_profile
+from bluefin_ai_huggingface import merge_registry
 
 BASE = Path.home() / '.config/bluefin-ai/platform'
 GIB = 1024 ** 3
@@ -23,7 +34,17 @@ class Rejected(Exception):
 
 
 def systemctl(*args):
-    subprocess.run(['systemctl', '--user', *args], check=True, capture_output=True, timeout=950)
+    if args[0] == 'reset-failed':
+        # Reset only failed, loaded units; an unloaded unit cannot be failed.
+        result = subprocess.run(['systemctl', '--user', 'list-units', '--failed',
+                                 '--no-legend', '--plain', '--no-pager', *args[1:]],
+                                check=True, capture_output=True, text=True, timeout=15)
+        failed = {line.split()[0] for line in result.stdout.splitlines() if line.split()}
+        selected = [unit for unit in args[1:] if unit in failed]
+        if not selected:
+            return
+        args = ('reset-failed', *selected)
+    subprocess.run(['systemctl', '--user', *args], check=True, capture_output=True, text=True, timeout=950)
 
 
 def available():
@@ -33,18 +54,27 @@ def available():
     raise RuntimeError('MemAvailable is unavailable')
 
 
+def runtime_cached(profile):
+    models = Path.home() / '.local/share/bluefin-ai/models'
+    if not all(artifact_ready(models, artifact) for artifact in profile.get('artifacts', [])):
+        return False
+    try:
+        result = subprocess.run(['podman', 'image', 'exists', profile['image']],
+                                capture_output=True, text=True, timeout=5)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def runtime_preflight(profile):
     models = Path.home() / '.local/share/bluefin-ai/models'
-    for artifact in profile.get('artifacts', []):
-        path = models / artifact['name']
-        if not path.is_file() or path.stat().st_size != artifact['bytes']:
-            raise Rejected(503, 'Model preparation is pending; inspect bluefin-ai-models.service')
+    if not all(artifact_ready(models, artifact) for artifact in profile.get('artifacts', [])):
+        raise Rejected(503, 'Model preparation is pending; use bluefin-ai-platform models fetch MODEL')
     try:
-        prepared = subprocess.run(['systemctl', '--user', 'show', 'bluefin-ai-models.service',
-                                   '--property=SubState', '--value'],
-                                  capture_output=True, text=True, timeout=15)
-        if prepared.returncode or prepared.stdout.strip() != 'exited':
-            raise Rejected(503, 'Model preparation is pending or failed; inspect bluefin-ai-models.service')
+        cached = subprocess.run(['podman', 'image', 'exists', profile['image']],
+                                capture_output=True, text=True, timeout=30)
+        if cached.returncode:
+            raise Rejected(503, 'Runtime image is not prepared; use bluefin-ai-platform models fetch MODEL')
         result = subprocess.run(['bluefin-ai-memory', 'verify'], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Rejected(503, 'Cannot verify GPU readiness: ' + str(exc)) from exc
@@ -59,8 +89,13 @@ def ready(profile):
         connection.request('GET', '/v1/models', headers=headers)
         response = connection.getresponse()
         body = json.loads(response.read(1024 * 1024))
-        return response.status == 200 and any(m.get('id') == profile['backend_model']
-                                             for m in body.get('data', []))
+        models = body.get('data', [])
+        if response.status == 200 and profile.get('discover_backend_model'):
+            if len(models) == 1 and isinstance(models[0].get('id'), str) and 0 < len(models[0]['id']) <= 512:
+                profile['serving_model'] = models[0]['id']
+                return True
+            return False
+        return response.status == 200 and any(m.get('id') == profile['backend_model'] for m in models)
     except (OSError, ValueError, http.client.HTTPException):
         return False
     finally:
@@ -68,10 +103,13 @@ def ready(profile):
 
 
 class Controller:
-    def __init__(self, config, manage=systemctl, memory=available, health=ready, preflight=runtime_preflight):
+    def __init__(self, config, manage=systemctl, memory=available, health=ready, preflight=runtime_preflight,
+                 selection_path=None, retire=None, refresh=None, catalog_ready=runtime_cached):
         self.config, self.profiles = config, config['profiles']
         self.manage, self.memory, self.health = manage, memory, health
-        self.preflight = preflight
+        self.preflight, self.catalog_ready = preflight, catalog_ready
+        self.selection_path, self.retire, self.refresh = selection_path, retire, refresh
+        self.default = selected_profile(config, selection_path.parent) if selection_path else config['aliases']['general']
         self.condition = threading.Condition()
         self.current = self.pin = None
         self.inflight = 0
@@ -127,6 +165,8 @@ class Controller:
             raise Rejected(503, 'Runtime switch already in progress')
         if target is not None and self.cooldown.get(target, 0) > time.monotonic():
             raise Rejected(503, 'Runtime is cooling down after a failed activation')
+        if target is not None:
+            self.preflight(self.profiles[target])  # Missing downloads must not interrupt the current model.
         self.switching = True
         self.state = 'draining'
         old = self.current
@@ -168,9 +208,9 @@ class Controller:
         with self.gate():
             if self.switching:
                 raise Rejected(503, 'Runtime is draining or activating; retry later')
-            target = self.config['aliases'].get(alias)
+            target = self.default if alias == 'general' else self.config['aliases'].get(alias, alias if alias in self.profiles else None)
             if target is None:
-                raise Rejected(404, 'Unknown model alias')
+                raise Rejected(404, 'No model selected; fetch a Hugging Face source and run bluefin-ai-platform models use ID')
             if self.pin is not None and target != self.pin:
                 raise Rejected(409, 'A different runtime is manually pinned')
             if self.inflight >= self.config['max_inflight']:
@@ -187,11 +227,72 @@ class Controller:
                 self.last_used = time.monotonic()
                 self.condition.notify_all()
 
-    def control(self, action, profile=None):
+    def choose_default(self, profile, pin=False):
+        previous = self.current
+        self.activate(profile)
+        if self.selection_path:
+            path = self.selection_path
+            temporary = None
+            try:
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.selection-')
+                with os.fdopen(fd, 'w') as stream:
+                    stream.write(json.dumps({'profile': profile}) + '\n')
+                os.replace(temporary, path)
+            except OSError:
+                self.activate(previous)
+                raise
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+        self.default = profile
+        self.pin = profile if pin else None
+
+    def reload_models(self):
+        if self.refresh is None:
+            raise Rejected(503, 'Model registry reload is unavailable')
+        config = self.refresh()
+        previous = self.profiles.get(self.current, {})
+        runtime_definition = lambda profile: {key:value for key,value in profile.items() if key not in ('serving_model', 'hub_cache')}
+        if self.current and runtime_definition(config['profiles'].get(self.current, {})) != runtime_definition(previous):
+            raise Rejected(409, 'Cannot change an active model definition')
+        self.config, self.profiles = config, config['profiles']
+        if self.current and previous.get('serving_model'):
+            self.profiles[self.current]['serving_model'] = previous['serving_model']
+        if self.default not in self.profiles:
+            self.default = selected_profile(config, self.selection_path.parent) if self.selection_path else config['aliases']['general']
+        if self.pin not in self.profiles:
+            self.pin = None
+
+    def control(self, action, profile=None, purge_cache=False):
         with self.gate():
             if self.switching:
                 raise Rejected(503, 'A runtime switch is already draining')
-            if action == 'auto':
+            if action == 'reload':
+                self.reload_models()
+            elif action == 'clear':
+                self.activate(None)
+                if self.selection_path:
+                    self.selection_path.unlink(missing_ok=True)
+                self.default = None
+                self.pin = None
+            elif action in ('select', 'select-pin') and isinstance(profile, str) and profile in self.profiles:
+                self.choose_default(profile, pin=action == 'select-pin')
+            elif action == 'remove' and isinstance(profile, str) and profile in self.profiles:
+                if type(purge_cache) is not bool:
+                    raise Rejected(400, 'purge_cache must be a boolean')
+                target = self.profiles[profile]
+                if self.default is not None and same_model(target, self.profiles[self.default]):
+                    raise Rejected(409, 'Select another default model before removing this one')
+                if self.current and ({a['name'] for a in target['artifacts']} &
+                                     {a['name'] for a in self.profiles[self.current]['artifacts']}):
+                    raise Rejected(409, 'Unload the active model before removing its weights')
+                if self.retire is None:
+                    raise Rejected(503, 'Cache maintenance is unavailable')
+                self.retire(profile, purge_cache)  # Hold the admission gate through removal.
+                if self.refresh is not None:
+                    self.reload_models()
+            elif action == 'auto':
                 self.pin = None
             elif action == 'pin' and isinstance(profile, str) and profile in self.profiles:
                 self.activate(profile)
@@ -200,14 +301,41 @@ class Controller:
                 self.activate(None)
                 self.pin = None
             else:
-                raise Rejected(400, 'Use auto, unload, or pin with a configured profile')
+                raise Rejected(400, 'Use select, select-pin, pin, remove, auto or unload with a catalog profile')
+
+    def catalog(self):
+        # Snapshot the registry without holding admission during Podman checks.
+        with self.gate():
+            profiles = dict(self.profiles)
+        result, readiness = [], {}
+        for name, profile in profiles.items():
+            identity = (profile['image'], tuple((a['name'], a['sha256']) for a in profile['artifacts']))
+            if identity not in readiness:
+                readiness[identity] = self.catalog_ready(profile)
+            if not readiness[identity]:
+                continue
+            source = profile.get('source', {})
+            tokens = profile.get('context_tokens')
+            context = (str(tokens // 1024) + 'K') if tokens and tokens % 1024 == 0 else str(tokens or '?')
+            runtime = 'RamaLama' if profile['engine'] == 'ramalama' else profile['engine']
+            if source:
+                file = source.get('file') or source.get('format', 'checkpoint')
+                label = source['repo'] + ' / ' + file + ' (' + runtime + ', ' + context + ', @' + source['revision'][:12] + ')'
+            else:
+                label = profile['backend_model'] + ' (' + runtime + ', ' + context + ')'
+            result.append(dict(id='local/' + name, name=label, object='model', owned_by='local'))
+        return result
 
     def status(self):
         # try-lock keeps status responsive during a long model startup.
         if not self.condition.acquire(blocking=False):
             return {'state': self.state, 'switching': True}
         try:
-            return dict(state=self.state, current=self.current, pinned=self.pin, inflight=self.inflight)
+            return dict(state=self.state, current=self.current, selected=self.default,
+                        context_tokens=self.profiles[self.default].get('context_tokens') if self.default else None,
+                        runtime=self.profiles[self.current]['engine'] if self.current else None,
+                        source=self.profiles[self.default].get('source', {}).get('repo') if self.default else None,
+                        pinned=self.pin, inflight=self.inflight)
         finally:
             self.condition.release()
 
@@ -252,9 +380,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/control/status' and self.authorized(True):
             self.send_json(200, self.server.controller.status())
+        elif self.path == '/catalog/models' and self.authorized():
+            try:
+                self.send_json(200, {'object': 'list', 'data': self.server.controller.catalog()})
+            except Rejected as exc:
+                self.send_json(exc.code, {'error': {'message': str(exc)}})
         elif self.path == '/v1/models' and self.authorized():
             self.send_json(200, {'object': 'list', 'data': [dict(id=a, object='model', owned_by='local')
-                           for a in self.server.controller.config['aliases']]})
+                           for a in dict.fromkeys([*self.server.controller.config['aliases'], *self.server.controller.profiles])]})
         else:
             self.send_json(401, {'error': {'message': 'Unauthorized or unsupported route'}})
 
@@ -278,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise Rejected(400, 'JSON object required')
             if admin:
-                controller.control(body.get('action'), body.get('profile'))
+                controller.control(body.get('action'), body.get('profile'), body.get('purge_cache', False))
                 self.send_json(200, controller.status())
                 return
             if self.path not in ('/v1/chat/completions', '/v1/completions'):
@@ -287,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(alias, str):
                 raise Rejected(400, 'String model alias required')
             with controller.lease(alias) as profile:
-                body['model'] = profile['backend_model']
+                body['model'] = profile.get('serving_model', profile['backend_model'])
                 connection = http.client.HTTPConnection('127.0.0.1', profile['port'], timeout=300)
                 try:
                     headers = {'Content-Type': 'application/json'}
@@ -316,16 +449,32 @@ class Handler(BaseHTTPRequestHandler):
             # Once headers/tokens are sent, close the stream; never replay generation.
 
 
+def retire_profile(profile, purge_cache):
+    args = ['/usr/bin/bluefin-ai-platform', '_remove-model-files', '--profile', profile]
+    if purge_cache:
+        args.append('--purge-cache')
+    result = subprocess.run(args, capture_output=True, text=True, timeout=120,
+                            env={**os.environ, 'BLUEFIN_AI_MAINTENANCE': '1'})
+    if result.returncode:
+        raise Rejected(503, result.stderr.strip()[-2000:] or 'Model cache removal failed')
+
+
 def main():
     os.umask(0o077)
-    config = json.loads((BASE / 'controller.json').read_text())
+    # Import validation from the same image-owned platform executable.
+    import runpy
+    module = runpy.run_path('/usr/bin/bluefin-ai-platform')
+    def refresh():
+        config = module['validate'](merge_registry(json.loads((BASE / 'controller.json').read_text()), BASE))
+        for profile in config['profiles'].values():
+            if profile['requires_key']:
+                profile['backend_key'] = inference_key
+        return config
     inference_key = (BASE / 'inference-key').read_text().strip()
-    for profile in config['profiles'].values():
-        if profile['requires_key']:
-            profile['backend_key'] = inference_key
+    config = refresh()
     lock = (BASE / 'controller.lock').open('a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    controller = Controller(config)
+    controller = Controller(config, selection_path=BASE / 'selection.json', retire=retire_profile, refresh=refresh)
     controller.reconcile()
     server = ThreadingHTTPServer(('127.0.0.1', 18100), Handler)
     server.controller = controller

@@ -143,6 +143,9 @@ ai-model-list:
     set -euo pipefail
 
     bluefin-agent-user require
+    if systemctl --user is-active --quiet bluefin-runtime-controller.service || systemctl --user is-active --quiet bluefin-ai-platform.target; then
+      exec bluefin-ai-platform models list
+    fi
     command -v ramalama >/dev/null 2>&1 || {
       echo "RamaLama is missing. Ask an administrator to install it with Homebrew, then run: ujust ramalama-bootstrap" >&2
       exit 1
@@ -162,6 +165,10 @@ ai-model-select $MODEL="" $CONTEXT_LENGTH="" $BACKEND="ramalama":
     set -euo pipefail
 
     bluefin-agent-user require
+    if systemctl --user is-active --quiet bluefin-runtime-controller.service || systemctl --user is-active --quiet bluefin-ai-platform.target; then
+      echo "The platform owns models. Use: bluefin-ai-platform models use <model> --context 64k" >&2
+      exit 2
+    fi
     model="${MODEL}"
     backend="${BACKEND}"
     if [[ -z "$model" ]]; then

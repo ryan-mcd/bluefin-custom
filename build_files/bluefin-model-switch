@@ -221,7 +221,7 @@ def main():
         validate(args.model, args.context, args.backend, 'model-only', '8080', '8643')
         run(['bluefin-agent-user', 'require'])
         if active('bluefin-runtime-controller.service'):
-            raise RuntimeError('The AI platform controller owns runtime switching; use its control API.')
+            raise RuntimeError('The AI platform controller owns runtime switching; use bluefin-ai-platform models use MODEL --context 64k.')
         directory = Path.home() / '.config/bluefin-ai'
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (directory / 'model-switch.lock').open('a') as lock:

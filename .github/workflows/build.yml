@@ -61,6 +61,7 @@ jobs:
           sudo apt-get install -y shellcheck python3-venv podman skopeo
           python3 -m venv /tmp/bluefin-sast
           /tmp/bluefin-sast/bin/pip install rust-just==1.59.0 bandit==1.8.6
+          /tmp/bluefin-sast/bin/pip install --require-hashes --only-binary=:all: -c build_files/ai-platform/requirements.in -r build_files/ai-platform/requirements.txt
           echo "/tmp/bluefin-sast/bin" >> "$GITHUB_PATH"
 
       - name: Static validation
@@ -81,7 +82,8 @@ jobs:
             build_files/bluefin-strata-prepare build_files/bluefin-strata-proxy build_files/bluefin-strata-check
           bash -n build_files/ai-platform/bluefin-ai-platform-boot
           python3 -m py_compile build_files/ai-platform/bluefin-ai-memory \
-            build_files/ai-platform/bluefin-ai-platform build_files/ai-platform/bluefin-runtime-controller
+            build_files/ai-platform/bluefin-ai-platform build_files/ai-platform/bluefin-runtime-controller \
+            build_files/ai-platform/bluefin_ai_models.py build_files/ai-platform/bluefin_ai_huggingface.py
           python3 build_files/ai-platform/bluefin-ai-platform validate --config build_files/ai-platform/platform.json
 
       - name: ShellCheck security checks
@@ -97,7 +99,10 @@ jobs:
             build_files/ai-platform/bluefin-ai-platform-boot
 
       - name: Bandit security scan
-        run: /tmp/bluefin-sast/bin/bandit -ll build_files/bluefin-ai-dashboard
+        run: |
+          /tmp/bluefin-sast/bin/bandit -ll build_files/bluefin-ai-dashboard \
+            build_files/ai-platform/bluefin-runtime-controller \
+            build_files/ai-platform/bluefin_ai_models.py build_files/ai-platform/bluefin_ai_huggingface.py
 
       - name: Unit and integration tests
         run: |

@@ -2,13 +2,14 @@
 import copy
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from test_ai_platform import ASSETS, configuration, platform
+from test_ai_platform import ASSETS, configuration, platform, runtime
 
 
 class BootProvisionTests(unittest.TestCase):
@@ -44,6 +45,44 @@ class BootProvisionTests(unittest.TestCase):
         platform.provision(self.config)
         self.assertTrue((self.base / 'release').exists())
         self.images.assert_called_once_with(self.config, runtimes=False)
+
+    def test_webui_publishes_configured_aliases_and_uses_the_authenticated_ingress(self):
+        platform.provision(self.config)
+        env = dict(line.split('=', 1) for line in (self.base / 'webui.env').read_text().splitlines())
+        connection = json.loads(env['OPENAI_API_CONFIGS'])['0']
+        self.assertTrue(connection['enable'])
+        self.assertEqual(connection['model_ids'], [])
+        nginx = (self.base / 'nginx.conf').read_text()
+        self.assertNotIn('@@INFERENCE_KEY@@', nginx)
+        self.assertIn('proxy_pass http://127.0.0.1:18100/catalog/models', nginx)
+        self.assertEqual(env['OPENAI_API_KEYS'], (self.base / 'client-key').read_text().strip())
+        quadlet = (self.home / '.config/containers/systemd/bluefin-platform-webui.container').read_text()
+        self.assertIn('OPENAI_API_BASE_URLS=http://127.0.0.1:8643/v1', quadlet)
+
+    def test_fresh_units_are_started_without_resetting_unloaded_units(self):
+        def manager(*args, **_kwargs):
+            self.events.append(args)
+            if args[:3] == ('systemctl', '--user', 'reset-failed'):
+                raise RuntimeError('Unit not loaded')
+            return SimpleNamespace(stdout='')
+
+        self.run.side_effect = manager
+        platform.provision(self.config)
+        self.assertIn(('systemctl', '--user', 'start', 'bluefin-ai-platform.target'), self.events)
+        self.assertTrue((self.base / 'release').exists())
+
+    def test_retry_resets_only_failed_managed_units_including_model_preparation(self):
+        def manager(*args, **_kwargs):
+            self.events.append(args)
+            if args[:3] == ('systemctl', '--user', 'list-units'):
+                return SimpleNamespace(stdout='bluefin-ai-models.service loaded failed failed Models\n'
+                                       'unrelated.service loaded failed failed Other\n')
+            return SimpleNamespace(stdout='')
+
+        self.run.side_effect = manager
+        platform.provision(self.config)
+        resets = [event for event in self.events if event[:3] == ('systemctl', '--user', 'reset-failed')]
+        self.assertEqual(resets, [('systemctl', '--user', 'reset-failed', 'bluefin-ai-models.service')])
 
     def test_unchanged_release_repairs_quadlets_and_preserves_credentials_on_next_boot(self):
         platform.provision(self.config)
@@ -111,6 +150,45 @@ class BootProvisionTests(unittest.TestCase):
         self.images.assert_not_called()
 
 
+class CommandFailureTests(unittest.TestCase):
+    def test_start_failure_exposes_systemd_stderr_but_not_inspection_stdout(self):
+        failure = subprocess.CalledProcessError(
+            1, ['systemctl', '--user', 'start', 'bluefin-ai-platform.target'],
+            output='private container data', stderr='Job failed: dependency missing')
+        with patch.object(platform.subprocess, 'run', side_effect=failure):
+            with self.assertRaisesRegex(RuntimeError, 'dependency missing') as error:
+                platform.run('systemctl', '--user', 'start', 'bluefin-ai-platform.target')
+        self.assertIn('exit 1', str(error.exception))
+        self.assertNotIn('private container data', str(error.exception))
+
+    def test_timeout_identifies_the_operation(self):
+        with patch.object(platform.subprocess, 'run', side_effect=subprocess.TimeoutExpired(['podman', 'pull'], 30)):
+            with self.assertRaisesRegex(RuntimeError, 'timed out after 30s: podman pull'):
+                platform.run('podman', 'pull', 'example.test/image', timeout=30)
+
+
+class RuntimeResetTests(unittest.TestCase):
+    def test_fresh_runtime_is_started_without_resetting_unloaded_unit(self):
+        def manager(args, **_kwargs):
+            if args[2] == 'reset-failed':
+                raise subprocess.CalledProcessError(1, args, stderr='Unit not loaded')
+            return SimpleNamespace(stdout='')
+
+        with patch.object(runtime.subprocess, 'run', side_effect=manager) as run:
+            runtime.systemctl('reset-failed', 'bluefin-runtime-small.service')
+            runtime.systemctl('start', 'bluefin-runtime-small.service')
+        self.assertEqual(run.call_args.args[0], ['systemctl', '--user', 'start', 'bluefin-runtime-small.service'])
+
+    def test_failed_runtime_is_reset_and_query_failure_is_not_ignored(self):
+        failed = SimpleNamespace(stdout='bluefin-runtime-small.service loaded failed failed Runtime\n')
+        with patch.object(runtime.subprocess, 'run', return_value=failed) as run:
+            runtime.systemctl('reset-failed', 'bluefin-runtime-small.service')
+        self.assertEqual(run.call_args.args[0], ['systemctl', '--user', 'reset-failed', 'bluefin-runtime-small.service'])
+        with patch.object(runtime.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['systemctl'])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                runtime.systemctl('reset-failed', 'bluefin-runtime-small.service')
+
+
 class ImageCacheTests(unittest.TestCase):
     def test_cached_images_boot_without_registry_access(self):
         config = configuration()
@@ -145,11 +223,22 @@ class ReadinessTests(unittest.TestCase):
     def probe(port, _path, credential=None):
         if port == 18100:
             return 200, b'{"state":"idle"}'
-        if port == 3000:
+        if port in (3000, 3001):
             return 200, b'{"status":true}'
         if port == 8643 and not credential:
             return 401, b''
-        return 200, b'{"data":[{"id":"general"}]}'
+        return 200, b'{"data":[{"id":"local/general"},{"id":"local/coding"}]}'
+
+    def test_nonempty_but_wrong_model_catalog_does_not_pass_readiness(self):
+        def probe(port, path, credential=None):
+            if port == 18101:
+                return 200, b'{"data":[{"id":"unconfigured/model"}]}'
+            return self.probe(port, path, credential)
+
+        with patch.object(platform, 'run', side_effect=self.metadata), patch.object(platform, 'probe', side_effect=probe):
+            with patch.object(platform, 'key', return_value='test-key'):
+                with self.assertRaisesRegex(RuntimeError, 'missing configured aliases'):
+                    platform.verify_platform(configuration(), timeout=0)
 
     def test_readiness_checks_actual_image_ids_and_private_auth(self):
         with patch.object(platform, 'run', side_effect=self.metadata):

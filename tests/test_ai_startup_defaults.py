@@ -1,5 +1,6 @@
 """Default boot must start the UI without waiting for GPU/model preparation."""
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,15 +11,14 @@ from test_ai_platform import ASSETS, configuration, platform, runtime
 
 
 class StartupDefaultsTests(unittest.TestCase):
-    def test_default_is_enabled_with_complete_immutable_starter_model(self):
+    def test_default_boot_starts_without_a_model_download_or_implicit_selection(self):
         config = platform.resolve_images(json.loads((ASSETS / 'platform.json').read_text()), ASSETS / 'Dockerfile')
         platform.validate(config)
         self.assertTrue(config['enabled'])
-        self.assertEqual(config['aliases'], {'general': 'starter'})
-        artifact = config['profiles']['starter']['artifacts'][0]
-        self.assertIn('/23749fefcc72300e3a2ad315e1317431b06b590a/', artifact['url'])
-        self.assertEqual(artifact['bytes'], 639446688)
-        self.assertEqual(artifact['sha256'], '9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031')
+        self.assertIsNone(config['aliases']['general'])
+        self.assertEqual(config['profiles'], {})
+        self.assertEqual(config['prepare_on_boot'], [])
+        self.assertNotIn('webui_aliases',config)
 
     def test_control_plane_image_pull_does_not_pull_optional_engines(self):
         config = configuration()
@@ -36,7 +36,7 @@ class StartupDefaultsTests(unittest.TestCase):
                 with patch.object(platform, 'model_artifact') as artifact, patch.object(platform, 'ensure_images') as images:
                     platform.prepare_models()
             run.assert_called_once_with('bluefin-agent-user', 'require')
-            self.assertEqual(artifact.call_count, 2)
+            self.assertEqual(artifact.call_count, 1)
             self.assertEqual(images.call_args.args[0]['images'], {})
 
     def test_missing_model_refuses_inference_without_stopping_ui(self):
@@ -50,24 +50,61 @@ class StartupDefaultsTests(unittest.TestCase):
     def test_gpu_failure_is_an_inference_error(self):
         profile = dict(configuration()['profiles']['small'], artifacts=[])
         failure = SimpleNamespace(returncode=1, stderr='reboot required')
-        with patch.object(runtime.subprocess, 'run', side_effect=[SimpleNamespace(returncode=0, stdout='exited\n'), failure]):
+        with patch.object(runtime.subprocess, 'run', side_effect=[SimpleNamespace(returncode=0), failure]):
             with self.assertRaisesRegex(runtime.Rejected, 'WebUI remains available') as error:
                 runtime.runtime_preflight(profile)
         self.assertEqual(error.exception.code, 503)
 
-    def test_existing_model_waits_for_checksum_and_image_preparation(self):
-        profile = dict(configuration()['profiles']['small'], artifacts=[])
-        with patch.object(runtime.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='running\n')) as run:
-            with self.assertRaisesRegex(runtime.Rejected, 'preparation is pending'):
-                runtime.runtime_preflight(profile)
-        self.assertEqual(run.call_count, 1)
+    def test_existing_model_waits_for_its_checksum_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            models = home / '.local/share/bluefin-ai/models'
+            models.mkdir(parents=True)
+            (models / 'test.gguf').write_bytes(b'test')
+            profile = configuration()['profiles']['small']
+            with patch.object(Path, 'home', return_value=home), patch.object(runtime.subprocess, 'run') as run:
+                with self.assertRaisesRegex(runtime.Rejected, 'preparation is pending'):
+                    runtime.runtime_preflight(profile)
+            run.assert_not_called()
+
+    def test_verified_model_can_run_while_other_profiles_are_still_preparing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            models = home / '.local/share/bluefin-ai/models'
+            models.mkdir(parents=True)
+            path = models / 'test.gguf'
+            path.write_bytes(b'test')
+            artifact = dict(name='test.gguf', bytes=4, sha256=hashlib.sha256(b'test').hexdigest())
+            platform.model_artifact(models, artifact)
+            profile = dict(configuration()['profiles']['small'], artifacts=[artifact])
+            with patch.object(Path, 'home', return_value=home):
+                with patch.object(runtime.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run:
+                    runtime.runtime_preflight(profile)
+                    path.chmod(0o600)  # ctime-only changes such as SELinux relabeling keep the receipt valid.
+                    runtime.runtime_preflight(profile)
+                    self.assertFalse(any('systemctl' in call.args[0] for call in run.call_args_list))
+                # A same-length change cannot reuse the old verification receipt.
+                path.write_bytes(b'evil')
+                with self.assertRaisesRegex(runtime.Rejected, 'preparation is pending'):
+                    runtime.runtime_preflight(profile)
+
+    def test_catalog_availability_requires_verified_weights_and_a_cached_image(self):
+        profile=configuration()['profiles']['small']
+        with tempfile.TemporaryDirectory() as directory,patch.object(Path,'home',return_value=Path(directory)):
+            with patch.object(runtime.subprocess,'run') as run:
+                self.assertFalse(runtime.runtime_cached(profile));run.assert_not_called()
+            with patch.object(runtime,'artifact_ready',return_value=True):
+                with patch.object(runtime.subprocess,'run',return_value=SimpleNamespace(returncode=1)):
+                    self.assertFalse(runtime.runtime_cached(profile))
+                with patch.object(runtime.subprocess,'run',return_value=SimpleNamespace(returncode=0)):
+                    self.assertTrue(runtime.runtime_cached(profile))
 
     def test_status_uses_the_agent_account_even_from_root(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             (base / 'platform.json').write_text('{"enabled":true}')
             with patch.object(platform, 'ASSETS', base), patch.object(platform, 'run', return_value=SimpleNamespace(stdout='claudex\n')):
-                with patch.object(platform.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=1001)):
+                with patch.object(platform.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=1001, pw_dir='/var/home/claudex')):
                     with patch.object(platform.os, 'geteuid', return_value=0), patch.object(platform.subprocess, 'run') as run:
                         platform.show_status()
             calls = [c.args[0] for c in run.call_args_list]

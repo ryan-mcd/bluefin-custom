@@ -17,3 +17,12 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: "deps(platform)"
+
+  # Official HF client/CLI and its hash-locked Python dependencies.
+  - package-ecosystem: "pip"
+    directory: "/build_files/ai-platform"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(huggingface)"

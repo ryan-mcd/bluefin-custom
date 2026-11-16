@@ -1,0 +1,37 @@
+<?xml version='1.0' encoding='utf-8'?>
+<policy target="CONTINUE" priority="-100">
+  <short>Bluefin AI private network access</short>
+  <description>Allow WebUI and authenticated inference from the home LAN and Tailscale address ranges.</description>
+  <ingress-zone name="ANY" />
+  <egress-zone name="HOST" />
+  <rule family="ipv4">
+    <source address="192.168.0.0/16" />
+    <port port="3000" protocol="tcp" />
+    <accept />
+  </rule>
+  <rule family="ipv4">
+    <source address="192.168.0.0/16" />
+    <port port="8643" protocol="tcp" />
+    <accept />
+  </rule>
+  <rule family="ipv4">
+    <source address="100.64.0.0/10" />
+    <port port="3000" protocol="tcp" />
+    <accept />
+  </rule>
+  <rule family="ipv4">
+    <source address="100.64.0.0/10" />
+    <port port="8643" protocol="tcp" />
+    <accept />
+  </rule>
+  <rule family="ipv6">
+    <source address="fd7a:115c:a1e0::/48" />
+    <port port="3000" protocol="tcp" />
+    <accept />
+  </rule>
+  <rule family="ipv6">
+    <source address="fd7a:115c:a1e0::/48" />
+    <port port="8643" protocol="tcp" />
+    <accept />
+  </rule>
+</policy>

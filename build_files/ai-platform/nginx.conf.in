@@ -12,15 +12,39 @@ http {
     fastcgi_temp_path /tmp/fastcgi;
     uwsgi_temp_path /tmp/uwsgi;
     scgi_temp_path /tmp/scgi;
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        "" close;
+    }
+    # Only same-origin browser traffic reaches WebUI. Normalize approved
+    # Origins for its loopback backend, including Socket.IO/WebSocket requests.
+    map "$http_origin|$http_host" $webui_origin_allowed {
+        default 0;
+        ~^\| 1;
+        ~^http://([^/|]+)\|\1$ 1;
+    }
+    map $http_origin $webui_upstream_origin {
+        "" "";
+        default http://127.0.0.1:3001;
+    }
     map $http_authorization $authorized {
         default 0;
         "Bearer @@CLIENT_KEY@@" 1;
     }
     server {
-        listen 127.0.0.1:8643;
+        listen 0.0.0.0:8643;
+        listen [::]:8643 ipv6only=on;
+        include /etc/nginx/bluefin-sources.conf;
         client_max_body_size 4m;
         if ($authorized = 0) { return 401; }
-        location = /v1/models { proxy_pass http://127.0.0.1:18101; }
+        # Model discovery is live platform state; Bifrost's provider catalog can
+        # lag installation. Completions still pass through Bifrost.
+        location = /v1/models {
+            proxy_pass http://127.0.0.1:18100/catalog/models;
+            proxy_set_header Host 127.0.0.1:18100;
+            proxy_set_header Authorization "Bearer @@INFERENCE_KEY@@";
+            add_header Cache-Control "no-store" always;
+        }
         location = /v1/chat/completions { proxy_pass http://127.0.0.1:18101; }
         location = /v1/completions { proxy_pass http://127.0.0.1:18101; }
         location / { return 404; }
@@ -32,4 +56,30 @@ http {
         proxy_read_timeout 1800s;
         proxy_next_upstream off;
     }
+    server {
+        listen 0.0.0.0:3000;
+        listen [::]:3000 ipv6only=on;
+        include /etc/nginx/bluefin-sources.conf;
+        if ($webui_origin_allowed = 0) { return 403; }
+        client_max_body_size 64m;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Origin $webui_upstream_origin;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 1800s;
+        proxy_next_upstream off;
+        # Force a fresh WebUI model snapshot, including after the last removal.
+        location = /api/models {
+            proxy_pass http://127.0.0.1:3001/api/models?refresh=true;
+            add_header Cache-Control "no-store" always;
+        }
+        location / { proxy_pass http://127.0.0.1:3001; }
+    }
+
 }

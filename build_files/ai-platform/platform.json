@@ -6,51 +6,19 @@
     "edge": "image:edge"
   },
   "reserve_gib": 16,
-  "max_inflight": 2,
+  "max_inflight": 1,
   "startup_seconds": 900,
   "drain_seconds": 120,
   "idle_seconds": 900,
-  "profiles": {
-    "starter": {
-      "engine": "llamacpp",
-      "image": "image:llamacpp",
-      "accelerator": "vulkan",
-      "requires_key": true,
-      "backend_model": "qwen3-starter",
-      "port": 18110,
-      "resident_gib": 4,
-      "command": [
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8080",
-        "--model",
-        "/models/Qwen3-0.6B-Q8_0.gguf",
-        "--alias",
-        "qwen3-starter",
-        "--ctx-size",
-        "8192",
-        "--parallel",
-        "2",
-        "--n-gpu-layers",
-        "99",
-        "--jinja",
-        "--chat-template-kwargs",
-        "{\"enable_thinking\":false}",
-        "--api-key-file",
-        "/run/bluefin-key"
-      ],
-      "artifacts": [
-        {
-          "name": "Qwen3-0.6B-Q8_0.gguf",
-          "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
-          "bytes": 639446688,
-          "url": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf"
-        }
-      ]
-    }
-  },
+  "profiles": {},
   "aliases": {
-    "general": "starter"
+    "general": null
+  },
+  "prepare_on_boot": [],
+  "runtime_images": {
+    "ramalama": "image:ramalama",
+    "llamacpp": "image:llamacpp",
+    "strata": "image:strata",
+    "vllm": "image:vllm"
   }
 }

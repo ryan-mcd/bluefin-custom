@@ -42,6 +42,7 @@ dnf5 install -y \
   git-lfs \
   jq \
   openssl \
+  python3-pip \
   ripgrep \
   tmux
 
@@ -118,8 +119,16 @@ done
 install -Dm0755 /ctx/bluefin-ai-firewall /usr/bin/bluefin-ai-firewall
 install -Dm0755 /ctx/bluefin-model-gateway /usr/bin/bluefin-model-gateway
 install -Dm0755 /ctx/bluefin-ramalama-quadlet-fix /usr/bin/bluefin-ramalama-quadlet-fix
+install -Dm0644 /ctx/ai-platform/bluefin-ai.xml /usr/lib/firewalld/policies/bluefin-ai.xml
 # Image-owned platform defaults; credentials, model blobs and container storage
 # are created only after boot. Do not run Podman or rpm-ostree kargs in this build.
+# The Hub client/CLI is image-owned; runtime downloads remain rootless user data.
+python3 -m venv /usr/lib/bluefin-ai/huggingface
+/usr/lib/bluefin-ai/huggingface/bin/python3 -m pip install \
+  --no-cache-dir --only-binary=:all: --require-hashes \
+  -c /ctx/ai-platform/requirements.in -r /ctx/ai-platform/requirements.txt
+ln -sfn ../lib/bluefin-ai/huggingface/bin/hf /usr/bin/hf
+/usr/bin/hf --version
 install -d /usr/share/bluefin-ai/platform /usr/lib/systemd/user
 # CI compilation can leave __pycache__ directories; install only source assets.
 find /ctx/ai-platform -maxdepth 1 -type f \
@@ -147,6 +156,8 @@ install -Dm0644 /ctx/bluefin-strata-proxy.service /etc/systemd/user/bluefin-stra
 install -Dm0644 /ctx/sysctl-ai-agent.conf /etc/sysctl.d/90-ai-agent-workstation.conf
 install -Dm0644 /ctx/openclaw-gateway-localhost.conf /etc/systemd/user/openclaw-gateway.service.d/10-localhost-defaults.conf
 
+test -x /usr/bin/hf
+/usr/lib/bluefin-ai/huggingface/bin/python3 -c "import huggingface_hub"
 test -x /usr/bin/bluefin-agent-user
 test -x /usr/bin/bluefin-agent-ubuntu-setup
 test -x /usr/bin/bluefin-openclaw-run

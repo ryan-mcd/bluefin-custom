@@ -38,13 +38,14 @@ class ImageCatalogTests(unittest.TestCase):
         self.assertEqual(resolved['profiles']['small']['image'], platform.podman_reference(updated))
         self.assertEqual(resolved['profiles']['large']['image'], config['profiles']['large']['image'])
 
-    def test_examples_reference_all_managed_runtime_images(self):
+    def test_source_runtime_choices_reference_managed_images_without_model_presets(self):
+        config = json.loads((ASSETS / 'platform.json').read_text())
+        resolved = platform.resolve_images(config, ASSETS / 'Dockerfile')
         examples = json.loads((ASSETS / 'profiles.example.json').read_text())
-        profiles = {name: profile for name, profile in examples.items() if name != 'notice'}
-        resolved = platform.resolve_images({'profiles': profiles}, ASSETS / 'Dockerfile')
-        self.assertEqual({p['engine'] for p in profiles.values()}, {'llamacpp', 'ramalama', 'strata', 'vllm'})
-        for profile in resolved['profiles'].values():
-            platform.digest(profile['image'])
+        self.assertEqual(set(resolved['runtime_images']), set(examples['runtime_choices']) - {'auto'})
+        self.assertEqual(config['profiles'], {})
+        for image in resolved['runtime_images'].values():
+            platform.digest(image)
 
     def test_unknown_reference_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'Unknown image catalog component'):

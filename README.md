@@ -9,9 +9,169 @@ for build/boot ownership, migration from the existing manual profiles, release
 qualification, API and rollback. Container versions are pinned in the
 [Dependabot-managed image catalog](build_files/ai-platform/Dockerfile); update PRs
 run the normal CI checks and verify Linux amd64 image availability. Boot creates
-and starts the platform under the configured agent account. A separate service
-prepares a checksum-verified Qwen3 0.6B starter model; GPU readiness gates model
-activation while WebUI remains available at `http://127.0.0.1:3000` on the host.
+and starts the platform under the configured agent account. It starts WebUI and
+the gateway without selecting or downloading a model. Model installation is
+rootless host data; adding a Hugging Face source requires no OS rebuild.
+
+Run as `claudex`, without sudo. Substitute the publisher, repository and exact
+filename you want; these are source identifiers, not built-in model aliases:
+
+```bash
+bluefin-ai-platform models inspect OWNER/REPOSITORY --file PATH/WEIGHTS.gguf
+bluefin-ai-platform models plan OWNER/REPOSITORY --file PATH/WEIGHTS.gguf
+bluefin-ai-platform models fetch OWNER/REPOSITORY --file PATH/WEIGHTS.gguf
+bluefin-ai-platform models list
+```
+
+After `fetch` succeeds, refresh Open WebUI, open the model picker at the top of
+a chat, and select the named model. Each choice shows its Hugging Face publisher,
+file/format, runtime, context and revision. Send a message: the controller loads
+that model on demand, switching away from the previous runtime when necessary.
+You can install several models and choose between them per chat. No CLI `use`
+step, WebUI connection edit, or WebUI model creation is required.
+
+An exact Hugging Face `resolve`/`blob` URL works instead of repository plus
+`--file`. `--revision BRANCH_OR_COMMIT` resolves to an immutable commit for the
+installation. Multiple GGUF variants require an explicit file; all shards of
+that file are included. The source determines publisher, weights and
+quantization. A native safetensors repository keeps its checkpoint/config/tokenizer
+layout; use `--format safetensors` when a repository contains both formats.
+Private/gated repositories use `HF_TOKEN`, `HF_TOKEN_PATH` or the user's private
+Hugging Face token file. Accept the publisher's access conditions separately.
+
+Runtime selection is independent of model source:
+
+| Runtime option | Serving path |
+| --- | --- |
+| `--runtime auto` | GGUF uses the RamaLama llama.cpp image; native safetensors uses vLLM |
+| `--runtime ramalama` | `llama-server` from the pinned RamaLama runtime image |
+| `--runtime llamacpp` | Direct llama.cpp Vulkan image |
+| `--runtime strata` | Strata ROCm, using the exact selected GGUF through `MODEL_PATH` |
+| `--runtime vllm` | Native safetensors snapshot through the ROCm vLLM image |
+
+The platform owns downloading, registry records and Quadlets. The `ramalama`
+adapter uses RamaLama's runtime image; it does not invoke the Homebrew RamaLama
+CLI or create a second RamaLama model cache. Strata is opt-in because a GGUF
+extension does not establish architecture/quantization support. Unsupported
+models fail activation and the controller attempts to restore the old runtime.
+Accepting any Hugging Face repository is not a promise that every model/task
+runs on the installed engines or this GPU. Remote Python model code is not
+automatically downloaded or executed.
+
+The default context is the smaller of 64K and the source's declared context.
+An explicit context cannot exceed that declaration; missing metadata requires
+`--context`. A conservative weight/KV/overhead estimate controls admission;
+unknown memory geometry requires `--memory-gib`. These are estimates, not
+measured GPU peaks. One model runtime and one generation are admitted at a time.
+
+```bash
+bluefin-ai-platform models fetch INSTALLED_ID --context 128k
+bluefin-ai-platform models fetch INSTALLED_ID --runtime strata --context 64k
+bluefin-ai-platform models status
+```
+
+Context/runtime variants share the original weights. Fetching a variant adds
+another named WebUI choice, without selecting a platform default. Each chat
+retains its selected model. The controller admits one generation at a time and
+drains an active request before loading another runtime.
+
+`models use ID` is optional: it loads a model and saves the target of the API
+alias `local/general`. WebUI uses explicit installed-model IDs instead of this
+global alias. `models pin ID` deliberately rejects requests for other models;
+use `models auto` to release the pin for normal picker switching. `models unload`
+frees the runtime while retaining the optional default; `models clear` unloads
+and forgets that default. Installed models remain available in the picker.
+
+`models plan` does not install or download full weights. `fetch` resolves source
+metadata through `HfApi` and bounded GGUF header reads through `HfFileSystem`,
+then downloads each selected file with the official `hf_hub_download` API. The
+platform still validates size/SHA256, creates serving profiles and readiness
+receipts, and reloads model discovery. It does not implement HTTP transfers,
+credential parsing or redirect/retry handling.
+
+The image installs the official `hf` CLI and library in an image-owned Python
+environment. Their hash-locked dependencies are maintained by daily Dependabot
+PRs and exercised by CI. No pip installation runs at boot, and the OS build downloads no model weights.
+Boot may prepare previously requested installations that are missing data.
+For private/gated sources, log in as `claudex`:
+
+```bash
+hf auth login
+hf auth whoami
+```
+
+The library uses standard HF authentication and cache configuration. The shared
+Hub cache defaults to `~/.cache/huggingface/hub`; `HF_HOME`/`HF_HUB_CACHE` may
+change its location. Each installation records its cache root for boot and
+cleanup. Runtime containers receive neither HF credentials nor the entire cache.
+They mount only their serving directory under `~/.local/share/bluefin-ai/models`.
+Verified files are hardlinked from the cache into that directory on the same
+filesystem, so weights occupy one copy. If the cache is on another filesystem,
+a verified copy is made after checking space in the serving filesystem.
+Existing verified/preseeded downloads remain usable without re-downloading.
+
+Repeat `fetch INSTALLED_ID` to retry its pinned installation. Completed
+cached files are reused, including unchanged blobs in another revision. The
+pinned 2.4.0 client retries transient HTTP failures within a running transfer;
+it deliberately removes unfinished HTTP files when a command exits, so a later
+command may download that unfinished file again. Xet transfer behavior is owned
+by the SDK. Boot verifies installed/selected models and adopts updated runtime
+images without silently changing weight revisions. Fetch the repository again
+to install a newer resolved revision.
+
+```bash
+bluefin-ai-platform models clear
+bluefin-ai-platform models remove INSTALLED_ID --purge-cache
+```
+
+Removal forgets all context/runtime variants of that source and removes their
+Quadlets, serving links/copies and readiness receipts. The official cache API
+releases its Hub revision only when no remaining model registration references
+that repository/revision in the same cache. Another quantization in the same
+revision therefore keeps that revision's cached files until it too is removed.
+Shared blobs needed by other revisions are retained by the official cache API.
+An ambiguous commit shared by different repositories is conservatively retained.
+`--purge-cache` additionally removes unused model runtime volumes, never WebUI
+chat data. Selected/active models and shared serving files remain protected;
+preparation/removal are serialized behind controller admission.
+
+`hf cache ls` and `hf cache verify` can inspect the official cache. Use platform
+`models remove` for coordinated removal: direct HF cache commands do not know
+about runtime state or serving links. No broad automatic `hf cache prune` runs;
+auxiliary transfer caches, crash orphans and old container images are not
+implicitly pruned. A checksum failure retains the official cache for inspection
+and does not publish an invalid serving view. For a failed new publication, repair the cache with `hf cache verify` /
+`hf download --force-download`, then retry. If an existing serving file is
+damaged, unload and remove/re-fetch that source; verified existing files are
+never silently replaced.
+
+Existing explicitly installed and saved selected legacy profiles migrate without
+losing weights. Old custom `/etc/bluefin-ai/platform.json` files remain full
+overrides; add `runtime_images` from the image defaults to enable new-source
+installation. Legacy dashboard/independent serving recipes must not run alongside
+the controller. In older chats using `local/general`, choose a named installed
+model once. Existing chat data is retained.
+
+Validation: 161 regression tests and CI static/security checks passed. The new
+image-owned CLI/library installation passed on Fedora 43 with Python 3.14;
+unprivileged `claudex` source inspection, a real small-file download, hardlinked
+serving view, readiness verification and revision cleanup passed. Local HTTP
+fixtures verified SDK stream retry and cache sharing. Earlier runtime/WebUI
+checks remain applicable; production Strix Halo GPU loading remains unverified.
+
+The rootless nginx gateway also accepts WebUI connections on port 3000 and
+OpenAI-compatible API connections on port 8643 from `192.168.0.0/16`, Tailscale
+IPv4 `100.64.0.0/10`, and Tailscale IPv6 `fd7a:115c:a1e0::/48`. Use
+`http://<Bluefin-LAN-or-Tailscale-IP>:3000` for WebUI or
+`http://<Bluefin-LAN-or-Tailscale-IP>:8643/v1` for API clients. API clients use the
+private key in the agent's `~/.config/bluefin-ai/platform/client-key`; WebUI uses
+its own account login. An image-owned firewalld policy permits only these
+sources/ports, and nginx independently applies the same source restrictions.
+The API, WebUI and models stay rootless as `claudex`; firewall configuration is
+loaded by the OS. Tailscale enrollment and tailnet access rules remain per-host.
+These URLs use HTTP: LAN traffic has no TLS, while Tailscale encrypts tailnet
+transport. The WebUI backend on port 3001 and Bifrost/controller/model ports stay
+on loopback.
 
 After deploying and rebooting, inspect the correct rootless account from an
 admin shell with `sudo bluefin-ai-platform status`. If startup fails, inspect

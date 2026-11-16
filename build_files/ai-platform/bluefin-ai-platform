@@ -1,6 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/lib/bluefin-ai/huggingface/bin/python3
 """Validate an image-defined release and provision its rootless services."""
 import argparse
+import errno
+import contextlib
 import fcntl
 import hashlib
 import http.client
@@ -9,13 +11,23 @@ import os
 import pwd
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
 import time
+import sys
 import urllib.parse
-import urllib.request
 from pathlib import Path
+
+# Source checkouts and the installed OS use the same image-owned library.
+_module_dir = Path(__file__).parent
+if not (_module_dir / 'bluefin_ai_models.py').is_file():
+    _module_dir = Path('/usr/share/bluefin-ai/platform')
+sys.path.insert(0, str(_module_dir))
+from bluefin_ai_models import ModelManager, selected_profile
+from bluefin_ai_huggingface import (cache_directory, download_artifact, make_profile, merge_registry, model_path,
+                                   registry_profiles, relative_name, resolve_source)
 
 ASSETS = Path('/usr/share/bluefin-ai/platform')
 BASE = Path.home() / '.config/bluefin-ai/platform'
@@ -27,7 +39,18 @@ SERVICES = ('bluefin-runtime-controller.service', 'bluefin-platform-bifrost.serv
 
 
 def run(*args, timeout=1800):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout)
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        # stderr contains the actionable Podman/systemd error; stdout may contain
+        # private container inspection data and must not be copied to the journal.
+        detail = (exc.stderr or '').strip()
+        message = f'Command failed (exit {exc.returncode}): {shlex.join(args)}'
+        if detail:
+            message += '\n' + detail[-4000:]
+        raise RuntimeError(message) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f'Command timed out after {timeout}s: {shlex.join(args)}') from exc
 
 
 def active(unit):
@@ -36,6 +59,17 @@ def active(unit):
     if result.returncode not in (0, 3, 4):
         raise RuntimeError('Cannot inspect user service ' + unit + ': ' + result.stderr.strip())
     return result.returncode == 0
+
+
+def reset_failed(*units):
+    # ResetFailedUnit does not load inactive units. Fresh Quadlets may exist on
+    # disk without being loaded into the manager yet; resetting them aborts boot.
+    result = run('systemctl', '--user', 'list-units', '--failed', '--no-legend',
+                 '--plain', '--no-pager', *units)
+    failed = {line.split()[0] for line in result.stdout.splitlines() if line.split()}
+    selected = [unit for unit in units if unit in failed]
+    if selected:
+        run('systemctl', '--user', 'reset-failed', *selected)
 
 
 def ensure_images(config, *, runtimes=True):
@@ -68,6 +102,7 @@ def probe(port, path, credential=None):
 
 def verify_platform(config, timeout=180):
     """A started unit alone does not prove the desired images or APIs are ready."""
+    expected_models = {'local/' + alias for alias in config['aliases']}
     expected = {}
     for name in ('bifrost', 'webui', 'edge'):
         try:
@@ -92,18 +127,22 @@ def verify_platform(config, timeout=180):
             status, body = probe(18100, '/control/status', admin_key)
             if status != 200 or json.loads(body).get('state') not in ('idle', 'ready', 'starting', 'draining', 'stopping'):
                 raise RuntimeError('Runtime controller is not ready')
+            status, body = probe(3001, '/health')
+            if status != 200 or json.loads(body).get('status') is not True:
+                raise RuntimeError('Open WebUI backend health check failed')
             status, body = probe(3000, '/health')
             if status != 200 or json.loads(body).get('status') is not True:
-                raise RuntimeError('Open WebUI health check failed')
+                raise RuntimeError('Open WebUI ingress health check failed')
             status, body = probe(18101, '/v1/models')
-            if status != 200 or not json.loads(body).get('data'):
-                raise RuntimeError('Bifrost model listing failed')
+            if status != 200 or not expected_models.issubset({m['id'] for m in json.loads(body).get('data', [])}):
+                raise RuntimeError('Bifrost model listing is missing configured aliases')
             status, _ = probe(8643, '/v1/models')
             if status != 401:
                 raise RuntimeError('Inference gateway did not require authentication')
             status, body = probe(8643, '/v1/models', client_key)
-            if status != 200 or not json.loads(body).get('data'):
-                raise RuntimeError('Authenticated inference gateway model listing failed')
+            data = json.loads(body).get('data')
+            if status != 200 or not isinstance(data, list):
+                raise RuntimeError('Authenticated inference gateway model discovery failed')
             return
         except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError, RuntimeError,
                 http.client.HTTPException, subprocess.SubprocessError) as exc:
@@ -161,6 +200,7 @@ def resolve_images(config, manifest=None):
 
     result = dict(config)
     result['images'] = {name: resolve(value) for name, value in config.get('images', {}).items()}
+    result['runtime_images'] = {name: resolve(value) for name, value in config.get('runtime_images', {}).items()}
     result['profiles'] = {name: dict(profile, image=resolve(profile['image']))
                           for name, profile in config.get('profiles', {}).items()}
     return result
@@ -189,9 +229,18 @@ def validate(config):
                             ('idle_seconds', 30, 86400)):
         if type(config[name]) is not int or not low <= config[name] <= high:
             raise ValueError('Invalid ' + name)
-    if not config['profiles'] or len(config['profiles']) > 8 or not config['aliases']:
-        raise ValueError('Provide 1-8 tested runtime profiles and at least one alias')
+    if len(config['profiles']) > 4096 or not config['aliases']:
+        raise ValueError('Provide at most 4096 installed runtime profiles and at least one alias')
+    for image in config.get('runtime_images', {}).values():
+        digest(image)
+    for field, choices in (('prepare_on_boot', config['profiles']), ('webui_aliases', config['aliases'])):
+        if field in config and (not isinstance(config[field], list) or
+                any(not isinstance(name, str) or name not in choices for name in config[field])):
+            raise ValueError('Invalid ' + field)
+    if 'general' not in config['aliases']:
+        raise ValueError('Provide a general alias for the platform-selected default')
     ports = set()
+    declared_artifacts = {}
     for name, profile in config['profiles'].items():
         if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', name):
             raise ValueError('Invalid profile name')
@@ -199,7 +248,7 @@ def validate(config):
             raise ValueError('Unsupported engine')
         digest(profile['image'])
         scalar(profile['backend_model'])
-        if type(profile['port']) is not int or not 18110 <= profile['port'] <= 18199 or profile['port'] in ports:
+        if type(profile['port']) is not int or not 18110 <= profile['port'] <= 18199 or (profile['port'] in ports and not profile.get('source')):
             raise ValueError('Use unique runtime ports in 18110-18199')
         ports.add(profile['port'])
         if type(profile['resident_gib']) is not int or not 1 <= profile['resident_gib'] <= 110:
@@ -216,21 +265,47 @@ def validate(config):
             if not re.fullmatch(r'[A-Z][A-Z0-9_]*', key):
                 raise ValueError('Invalid environment name')
             scalar(value)
+        if profile.get('hub_cache') is not None and (not isinstance(profile['hub_cache'], str) or not Path(profile['hub_cache']).is_absolute()):
+            raise ValueError('hub_cache must be an absolute local path')
+        if profile.get('model_directory') is not None and not re.fullmatch(r'hf-[0-9a-f]{20}', profile['model_directory']):
+            raise ValueError('Invalid model directory')
+        if 'cache_volume' in profile and (not isinstance(profile['cache_volume'], str) or
+                not re.fullmatch(r'bluefin-[a-z0-9-]{1,63}', profile['cache_volume'])):
+            raise ValueError('Use a bluefin-prefixed named cache volume')
+        if 'context_tokens' in profile and (type(profile['context_tokens']) is not int or
+                not 1 <= profile['context_tokens'] <= 262144):
+            raise ValueError('context_tokens must be between 1 and 262144')
+        if 'context_tokens' in profile:
+            if profile['engine'] in ('llamacpp', 'ramalama'):
+                command = profile['command']
+                try:
+                    total = int(command[command.index('--ctx-size') + 1])
+                    slots = int(command[command.index('--parallel') + 1])
+                except (ValueError, IndexError) as exc:
+                    raise ValueError('Declare numeric --ctx-size and --parallel for context_tokens') from exc
+                if slots < 1 or total != slots * profile['context_tokens']:
+                    raise ValueError('Runtime context/slots do not match context_tokens')
+            elif profile['engine'] == 'strata':
+                if profile.get('environment', {}).get('CONTEXT') != str(profile['context_tokens']):
+                    raise ValueError('Strata CONTEXT does not match context_tokens')
         if not profile['artifacts']:
             raise ValueError('Declare immutable model artifacts')
         for artifact in profile['artifacts']:
-            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', artifact['name']):
-                raise ValueError('Model artifact must be a simple filename')
+            relative_name(artifact['name'])
             if not re.fullmatch(r'[0-9a-f]{64}', artifact['sha256']):
                 raise ValueError('Model artifact SHA256 required')
             if type(artifact['bytes']) is not int or not 1 <= artifact['bytes'] <= 500 * 1024 ** 3:
                 raise ValueError('Declare model artifact size in bytes')
+            identity = (artifact['sha256'], artifact['bytes'])
+            if artifact['name'] in declared_artifacts and declared_artifacts[artifact['name']] != identity:
+                raise ValueError('Conflicting metadata for shared artifact: ' + artifact['name'])
+            declared_artifacts[artifact['name']] = identity
             if artifact.get('url'):
                 url = urllib.parse.urlsplit(artifact['url'])
                 if url.scheme != 'https' or not url.hostname or url.username or url.password:
                     raise ValueError('Model download URL must be HTTPS without embedded credentials')
     for alias, target in config['aliases'].items():
-        if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', alias) or target not in config['profiles']:
+        if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', alias) or (target not in config['profiles'] and not (alias == 'general' and target is None)):
             raise ValueError('Alias must identify a configured profile')
     return config
 
@@ -273,61 +348,73 @@ def runtime_quadlet(name, p):
     env = ''.join('Environment=' + json.dumps(k + '=' + v) + '\n'
                   for k, v in p.get('environment', {}).items())
     entrypoint = 'PodmanArgs=--entrypoint ' + json.dumps(p['entrypoint']) + '\n' if p.get('entrypoint') else ''
+    cache_volume = p.get('cache_volume', f'bluefin-runtime-{name}-cache')
+    shared_memory = 'PodmanArgs=--shm-size=2g\n' if p['engine'] == 'strata' else ''
+    directory = p.get('model_directory')
+    model_mount = ('Volume=%h/.local/share/bluefin-ai/models/' + directory + ':/models/' + directory + ':ro,z\n'
+                   if directory else 'Volume=%h/.local/share/bluefin-ai/models:/models:ro,z\n')
     return (f'[Unit]\nDescription=Managed {p["engine"]} runtime {name}\n'
             '[Container]\n' + f'Image={p["image"]}\nContainerName=bluefin-runtime-{name}\nUser=0\n'
-            f'PublishPort=127.0.0.1:{p["port"]}:8080\n' + devices + env + entrypoint +
+            f'PublishPort=127.0.0.1:{p["port"]}:8080\n' + devices + env + entrypoint + shared_memory +
             'EnvironmentFile=%h/.config/bluefin-ai/platform/engine.env\n'
-            'Volume=%h/.local/share/bluefin-ai/models:/models:ro,z\n'
+            + model_mount +
             'Volume=%h/.config/bluefin-ai/platform/inference-key:/run/bluefin-key:ro,z\n'
-            f'Volume=bluefin-runtime-{name}-cache:/data\n'
+            f'Volume={cache_volume}:/data\n'
             'DropCapability=all\nNoNewPrivileges=true\n'
             'Exec=' + ' '.join(json.dumps(a) for a in p['command']) + '\n'
             '[Service]\nRestart=no\nTimeoutStartSec=120\nTimeoutStopSec=120\n'
             f'MemoryMax={p["resident_gib"] + 2}G\n')
 
 
-def model_artifact(models, artifact):
-    """Preseed offline, or download with declared size, disk reserve and SHA256."""
-    models.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = models / artifact['name']
-    if path.is_symlink():
-        raise ValueError('Refusing model artifact symlink: ' + artifact['name'])
-    if not path.exists():
-        if not artifact.get('url'):
-            raise ValueError('Preseed model artifact or declare HTTPS URL: ' + artifact['name'])
-        if shutil.disk_usage(models).free < artifact['bytes'] + 8 * 1024 ** 3:
-            raise ValueError('Insufficient disk space for model plus 8 GiB reserve')
-        fd, temporary = tempfile.mkstemp(dir=models, prefix='.model-download-')
-        try:
-            # Only public HTTPS downloads; gated models must be preseeded.
-            with os.fdopen(fd, 'wb') as output, urllib.request.urlopen(artifact['url'], timeout=60) as response:
-                if urllib.parse.urlsplit(response.url).scheme != 'https':
-                    raise ValueError('Model redirect left HTTPS')
-                downloaded = 0
-                hasher = hashlib.sha256()
-                while True:
-                    chunk = response.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    downloaded += len(chunk)
-                    if downloaded > artifact['bytes']:
-                        raise ValueError('Model download exceeds declared size')
-                    output.write(chunk)
-                    hasher.update(chunk)
-            if downloaded != artifact['bytes'] or hasher.hexdigest() != artifact['sha256']:
-                raise ValueError('Downloaded model size or SHA256 mismatch')
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+def verify_model_file(path, artifact):
     if path.stat().st_size != artifact['bytes']:
         raise ValueError('Model size mismatch: ' + artifact['name'])
+    before = path.stat()
     hasher = hashlib.sha256()
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(8 * 1024 * 1024), b''):
             hasher.update(block)
     if hasher.hexdigest() != artifact['sha256']:
-        raise ValueError('Model checksum mismatch: ' + artifact['name'])
+        raise ValueError('Model checksum mismatch: ' + artifact['name'] +
+                         '; verify/repair the HF cache with hf cache verify or hf download --force-download')
+    after = path.stat()
+    fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    if any(getattr(before, field) != getattr(after, field) for field in fields):
+        raise ValueError('Model changed during verification: ' + artifact['name'])
+
+
+def model_artifact(models, artifact, cache_dir=None):
+    """Verify existing bytes or publish a view of an official HF cache file."""
+    models.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = model_path(models, artifact['name'])
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not path.exists():
+        cached = download_artifact(artifact, cache_dir).resolve(strict=True)
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.model-stage-')
+        os.close(fd)
+        try:
+            os.unlink(temporary)
+            try:
+                os.link(cached, temporary)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                if shutil.disk_usage(path.parent).free < artifact['bytes'] + 8 * 1024 ** 3:
+                    raise ValueError('Serving directory needs space for a cross-filesystem copy plus 8 GiB reserve') from exc
+                shutil.copyfile(cached, temporary)
+            verify_model_file(Path(temporary), artifact)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    else:
+        # Preserve already downloaded/preseeded models; no mandatory re-download.
+        verify_model_file(path, artifact)
+    after = path.stat()
+    receipt = dict(name=artifact['name'], sha256=artifact['sha256'], bytes=artifact['bytes'],
+                   stat=[getattr(after, field) for field in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns')])
+    receipt_id = hashlib.sha256((artifact['name'] + ':' + artifact['sha256']).encode()).hexdigest()
+    write(models / '.verified' / (receipt_id + '.json'), json.dumps(receipt) + '\n')
 
 
 def provision(config):
@@ -338,7 +425,10 @@ def provision(config):
     for unit in LEGACY:
         if active(unit):
             raise ValueError('Disable legacy AI profile before enabling the platform: ' + unit)
-    fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode())
+    migrate_installed_profiles(config)
+    release_config = config
+    config = validate(merge_registry(config, BASE))
+    fingerprint = hashlib.sha256(json.dumps(release_config, sort_keys=True).encode())
     for path in sorted(ASSETS.iterdir()):
         if path.is_file():
             fingerprint.update(path.name.encode())
@@ -364,11 +454,15 @@ def provision(config):
     webui_secret, admin_password = key('webui-secret'), key('webui-admin-password')
     write(BASE / 'bifrost.env', 'CONTROLLER_API_KEY=' + inference + '\n')
     write(BASE / 'engine.env', 'VLLM_API_KEY=' + inference + '\n')
+    # Empty model_ids enables provider discovery instead of a static UI allowlist.
+    webui_connections = json.dumps({'0': {'enable': True, 'prefix_id': '', 'model_ids': []}})
     write(BASE / 'webui.env', 'WEBUI_SECRET_KEY=' + webui_secret + '\nWEBUI_ADMIN_EMAIL=admin@example.com\n'
-          'WEBUI_ADMIN_PASSWORD=' + admin_password + '\n')
+          'WEBUI_ADMIN_PASSWORD=' + admin_password + '\nOPENAI_API_KEYS=' + client +
+          '\nOPENAI_API_CONFIGS=' + webui_connections + '\n')
     write(BASE / 'bifrost.json', (ASSETS / 'bifrost.json').read_text())
-    write(BASE / 'nginx.conf', (ASSETS / 'nginx.conf.in').read_text().replace('@@CLIENT_KEY@@', client))
-    write(BASE / 'controller.json', json.dumps(config, indent=2) + '\n')
+    write(BASE / 'nginx-sources.conf', (ASSETS / 'nginx-sources.conf').read_text())
+    write(BASE / 'nginx.conf', (ASSETS / 'nginx.conf.in').read_text().replace('@@CLIENT_KEY@@', client).replace('@@INFERENCE_KEY@@', inference))
+    write(BASE / 'controller.json', json.dumps(release_config, indent=2) + '\n')
     quadlets = Path.home() / '.config/containers/systemd'
     # Remove profiles from a prior stopped release, without touching legacy files.
     for path in quadlets.glob('bluefin-runtime-*.container'):
@@ -380,7 +474,7 @@ def provision(config):
     for name, profile in config['profiles'].items():
         write(quadlets / ('bluefin-runtime-' + name + '.container'), runtime_quadlet(name, profile))
     run('systemctl', '--user', 'daemon-reload')
-    run('systemctl', '--user', 'reset-failed', *SERVICES)
+    reset_failed(*SERVICES, 'bluefin-ai-models.service')
     try:
         run('systemctl', '--user', 'start', 'bluefin-ai-platform.target')
         verify_platform(config)
@@ -394,15 +488,158 @@ def provision(config):
     print('Platform reconciled: desired container images, WebUI and APIs verified. Private credentials: ' + str(BASE))
 
 
-def prepare_models():
+def prepare_models(profiles=None):
     run('bluefin-agent-user', 'require')
-    config = validate(json.loads((BASE / 'controller.json').read_text()))
+    config = effective_config()
     models = Path.home() / '.local/share/bluefin-ai/models'
-    for profile in config['profiles'].values():
+    manager = model_manager(config)
+    names = manager.boot_profiles() if profiles is None else profiles
+    verified = set()
+    for name in names:
+        profile = config['profiles'][name]
+        cache = cache_directory(profile)
+        records = registry_profiles(BASE)
+        if name in records and not records[name].get('hub_cache'):
+            records[name] = dict(records[name], hub_cache=str(cache))
+            write(BASE / 'model-registry.json', json.dumps(dict(version=1, profiles=records)) + '\n')
+        ensure_images({'images': {}, 'profiles': {name: profile}})
         for artifact in profile['artifacts']:
-            model_artifact(models, artifact)
-    ensure_images({'images': {}, 'profiles': config['profiles']})
-    print('Configured model artifacts verified and runtime images available')
+            identity = (artifact['name'], artifact['sha256'])
+            if identity not in verified:
+                model_artifact(models, artifact, cache_dir=cache)
+                verified.add(identity)
+        print('Prepared runtime/model profile: ' + name, flush=True)
+    print('Requested model artifacts verified and runtime images available')
+
+
+@contextlib.contextmanager
+def model_lock():
+    with (BASE / 'models.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError('Model preparation is running; retry after it finishes') from exc
+        yield
+
+
+def effective_config():
+    return validate(merge_registry(json.loads((BASE / 'controller.json').read_text()), BASE))
+
+
+def migrate_installed_profiles(config):
+    path = BASE / 'controller.json'
+    if not path.exists():
+        return
+    previous = json.loads(path.read_text())
+    manager = model_manager(previous)
+    wanted = manager.installed()
+    selected = selected_profile(previous, BASE, saved_only=True)
+    if selected:
+        wanted.add(selected)
+    profiles = registry_profiles(BASE)
+    for name in wanted:
+        if name not in config['profiles'] and name in previous['profiles'] and name not in profiles:
+            profiles[name] = previous['profiles'][name]
+    if profiles:
+        write(BASE / 'model-registry.json', json.dumps(dict(version=1, profiles=profiles)) + '\n')
+
+
+def save_profile(name, profile):
+    profiles = registry_profiles(BASE)
+    if name in profiles and {key:value for key,value in dict(profiles[name], image=profile['image']).items() if key != 'hub_cache'} != {key:value for key,value in profile.items() if key != 'hub_cache'}:
+        raise ValueError('Installed profile differs; remove it before replacing it')
+    profile = dict(profile, hub_cache=profiles.get(name, {}).get('hub_cache') or str(cache_directory(profile)))
+    profiles[name] = profile
+    config = json.loads((BASE / 'controller.json').read_text())
+    validate(dict(config, profiles={**config['profiles'], **profiles}))
+    write(BASE / 'model-registry.json', json.dumps(dict(version=1, profiles=profiles)) + '\n')
+    quadlets = Path.home() / '.config/containers/systemd'
+    write(quadlets / ('bluefin-runtime-' + name + '.container'), runtime_quadlet(name, profile))
+    run('systemctl', '--user', 'daemon-reload')
+
+
+def model_manager(config):
+    return ModelManager(config, BASE, Path.home() / '.local/share/bluefin-ai/models', run, write)
+
+
+def parse_context(value):
+    if not re.fullmatch(r'[1-9][0-9]*[kK]?', value):
+        raise argparse.ArgumentTypeError('Use a token count or a context such as 64k or 128k')
+    return int(value[:-1]) * 1024 if value.lower().endswith('k') else int(value)
+
+
+def manage_models(args):
+    run('bluefin-agent-user', 'require')
+    if not (BASE / 'controller.json').exists():
+        raise ValueError('Platform is not provisioned; inspect the boot service before managing models')
+    config = effective_config()
+    manager = model_manager(config)
+    action = args.model_action
+    if action == 'list':
+        manager.list_models()
+    elif action == 'status':
+        print(json.dumps(manager.control(), indent=2))
+    elif action in ('auto', 'unload', 'clear'):
+        print(json.dumps(manager.control(action), indent=2))
+    elif action in ('inspect', 'plan', 'fetch'):
+        existing = config['profiles'].get(args.source)
+        if existing:
+            if args.revision or args.file or args.format != 'auto':
+                raise ValueError('Supply a Hugging Face source to change its revision, file or format')
+            source = existing.get('source')
+            name, profile = args.source, existing
+            if action != 'inspect' and (args.context is not None or args.runtime != 'auto' or args.memory_gib is not None):
+                if source is None:
+                    raise ValueError('Re-fetch a Hugging Face source to change legacy model settings')
+                name, profile = make_profile(source, config['runtime_images'],
+                                             existing['engine'] if args.runtime == 'auto' else args.runtime,
+                                             args.context or existing.get('context_tokens'), args.memory_gib)
+        else:
+            source = resolve_source(args.source, args.revision, args.file, format=args.format)
+            if action != 'inspect':
+                name, profile = make_profile(source, config.get('runtime_images', {}), args.runtime, args.context, args.memory_gib)
+        if action == 'inspect':
+            print(json.dumps(source or existing, indent=2))
+            return
+        proposed = dict(config, profiles={**config['profiles'], name: profile})
+        validate(proposed)
+        print('Installed model ID: ' + name)
+        if source:
+            print('Source: ' + source['repo'] + '@' + source['revision'])
+            print('Format: ' + source['format'] + '; architecture: ' + str(source['architecture']))
+        print('Runtime: ' + profile['engine'] + (' (RamaLama-packaged llama.cpp)' if profile['engine'] == 'ramalama' else ''))
+        model_manager(proposed).plan([name])
+        if action == 'fetch':
+            with model_lock():
+                if name not in json.loads((BASE / 'controller.json').read_text())['profiles']:
+                    save_profile(name, profile)
+                updated = effective_config()
+                model_manager(updated).remember(manager.installed() | {name})
+                prepare_models([name])
+                model_manager(updated).control('reload')
+            print('Available in Open WebUI: refresh the page and select the model by its source name.')
+            print('Optional platform default: bluefin-ai-platform models use ' + name)
+    else:
+        name = manager.resolve(args.model)
+        if action in ('use', 'pin'):
+            profile = config['profiles'][name]
+            requested_runtime = args.runtime
+            requested_context = args.context
+            if requested_context is not None or requested_runtime != 'auto' or args.memory_gib is not None:
+                if not profile.get('source'):
+                    raise ValueError('Re-fetch a Hugging Face source to change legacy model settings')
+                engine = profile['engine'] if requested_runtime == 'auto' else requested_runtime
+                name, profile = make_profile(profile['source'], config['runtime_images'], engine,
+                                             requested_context or profile.get('context_tokens'), args.memory_gib)
+                with model_lock():
+                    save_profile(name, profile)
+                    prepare_models([name])
+                    model_manager(effective_config()).control('reload')
+            print(json.dumps(manager.control('select' if action == 'use' else 'select-pin', name), indent=2))
+            print('WebUI and other clients can keep using local/general.')
+        elif action == 'remove':
+            print(json.dumps(manager.control('remove', name, args.purge_cache), indent=2))
+            print('Removed installation and unshared weights; prepared caches ' + ('purged where unshared.' if args.purge_cache else 'retained.'))
 
 
 def show_status():
@@ -413,7 +650,9 @@ def show_status():
     print('Effective configuration: ' + str(config_path), flush=True)
     print('Enabled: ' + str(json.loads(config_path.read_text()).get('enabled')), flush=True)
     name = run('bluefin-agent-user', 'name').stdout.strip()
-    uid = pwd.getpwnam(name).pw_uid
+    account = pwd.getpwnam(name)
+    uid = account.pw_uid
+    credential_path = Path(account.pw_dir) / '.config/bluefin-ai/platform/client-key'
     print('Rootless service account: ' + name, flush=True)
     if os.geteuid() == 0:
         subprocess.run(['systemctl', '--no-pager', '--full', 'status',
@@ -429,22 +668,61 @@ def show_status():
     subprocess.run(prefix + ['systemctl', '--user', '--no-pager', '--full', 'status',
                              *SERVICES, 'bluefin-ai-models.service'], check=False)
     subprocess.run(prefix + ['podman', 'ps', '-a'], check=False)
-    print('Configured WebUI address on the Bluefin host: http://127.0.0.1:3000')
+    print('Service logs as ' + name + ': journalctl --user -b -u bluefin-runtime-controller.service '
+          '-u bluefin-platform-bifrost.service -u bluefin-platform-webui.service '
+          '-u bluefin-platform-edge.service --no-pager -n 100')
+    print('Configured WebUI: http://127.0.0.1:3000 or http://<LAN-or-Tailscale-IP>:3000')
+    print('Configured inference API: http://<host-IP>:8643/v1; credential file: ' + str(credential_path))
+    print('Endpoint availability is not verified by this status command.')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('validate', 'images', 'status', 'provision', 'prepare-models', 'stop-runtimes'))
-    parser.add_argument('--config', type=Path)
+    commands = parser.add_subparsers(dest='action', required=True)
+    for action in ('validate', 'images', 'status', 'provision', 'prepare-models', 'stop-runtimes'):
+        command = commands.add_parser(action)
+        command.add_argument('--config', type=Path)
+    internal = commands.add_parser('_remove-model-files', help=argparse.SUPPRESS)
+    internal.add_argument('--profile', required=True)
+    internal.add_argument('--purge-cache', action='store_true')
+    models = commands.add_parser('models', help='Manage Hugging Face models as the rootless agent account')
+    actions = models.add_subparsers(dest='model_action', required=True)
+    for action in ('list', 'status', 'auto', 'unload', 'clear', 'inspect', 'plan', 'fetch', 'use', 'pin', 'remove'):
+        command = actions.add_parser(action)
+        if action in ('inspect', 'plan', 'fetch'):
+            command.add_argument('source', help='Hugging Face owner/repository or exact file URL')
+            command.add_argument('--revision')
+            command.add_argument('--format', choices=('auto','gguf','safetensors'), default='auto')
+            command.add_argument('--file', help='Exact GGUF filename; all its shards are included')
+        if action in ('use', 'pin', 'remove'):
+            command.add_argument('model', help='Installed model ID (models list) or local/general')
+        if action in ('plan', 'fetch', 'use', 'pin'):
+            command.add_argument('--runtime', choices=('auto','ramalama','llamacpp','strata','vllm'), default='auto')
+            command.add_argument('--context', type=parse_context)
+            command.add_argument('--memory-gib', type=int, help='Explicit resident memory budget when metadata is insufficient')
+        if action == 'remove':
+            command.add_argument('--purge-cache', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     try:
+        if args.action == 'models':
+            manage_models(args)
+            return
+        if args.action == '_remove-model-files':
+            if os.environ.get('BLUEFIN_AI_MAINTENANCE') != '1':
+                raise ValueError('Use bluefin-ai-platform models remove MODEL')
+            run('bluefin-agent-user', 'require')
+            config = effective_config()
+            if args.profile not in config['profiles']:
+                raise ValueError('Unknown catalog profile')
+            with model_lock():
+                model_manager(config).remove_files(args.profile, args.purge_cache)
+            return
         if args.action == 'status':
             show_status()
             return
         if args.action == 'prepare-models':
-            with (BASE / 'models.lock').open('a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with model_lock():
                 prepare_models()
             return
         manifest = ASSETS / 'Dockerfile'
@@ -454,11 +732,9 @@ def main():
             print(json.dumps(image_catalog(manifest), indent=2))
             return
         if args.action == 'stop-runtimes':
-            config = json.loads((BASE / 'controller.json').read_text())
-            for name in config['profiles']:
-                if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', name):
-                    raise ValueError('Invalid profile name')
-                run('systemctl', '--user', 'stop', 'bluefin-runtime-' + name + '.service')
+            # Active units are loaded in systemd even if registry/config parsing
+            # failed. Controller failure must not leave a dynamic engine running.
+            run('systemctl', '--user', 'stop', 'bluefin-runtime-*.service')
             return
         config = validate(resolve_images(json.loads(args.config.read_text()), manifest)
                           if args.config else load())
