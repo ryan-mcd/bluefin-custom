@@ -25,7 +25,7 @@ _module_dir = Path(__file__).parent
 if not (_module_dir / 'bluefin_ai_models.py').is_file():
     _module_dir = Path('/usr/share/bluefin-ai/platform')
 sys.path.insert(0, str(_module_dir))
-from bluefin_ai_models import ModelManager, selected_profile
+from bluefin_ai_models import ModelManager, selected_profile, warn_forced_memory
 from bluefin_ai_huggingface import (cache_directory, download_artifact, make_profile, merge_registry, model_path,
                                    registry_profiles, relative_name, resolve_source)
 
@@ -254,7 +254,10 @@ def validate(config):
         if type(profile['port']) is not int or not 18110 <= profile['port'] <= 18199 or (profile['port'] in ports and not profile.get('source')):
             raise ValueError('Use unique runtime ports in 18110-18199')
         ports.add(profile['port'])
-        if type(profile['resident_gib']) is not int or not 1 <= profile['resident_gib'] <= 110:
+        if type(profile.get('force_memory', False)) is not bool:
+            raise ValueError('force_memory must be a boolean')
+        if (type(profile['resident_gib']) is not int or profile['resident_gib'] < 1 or
+                (profile['resident_gib'] > 110 and not profile.get('force_memory', False))):
             raise ValueError('resident_gib must bound weights + KV + runtime overhead')
         if profile['accelerator'] not in ('vulkan', 'rocm') or type(profile['requires_key']) is not bool:
             raise ValueError('Set accelerator and requires_key explicitly')
@@ -591,16 +594,18 @@ def manage_models(args):
                 raise ValueError('Supply a Hugging Face source to change its revision, file or format')
             source = existing.get('source')
             name, profile = args.source, existing
-            if action != 'inspect' and (args.context is not None or args.runtime != 'auto' or args.memory_gib is not None):
+            if action != 'inspect' and (args.context is not None or args.runtime != 'auto' or args.memory_gib is not None or args.force):
                 if source is None:
                     raise ValueError('Re-fetch a Hugging Face source to change legacy model settings')
                 name, profile = make_profile(source, config['runtime_images'],
                                              existing['engine'] if args.runtime == 'auto' else args.runtime,
-                                             args.context or existing.get('context_tokens'), args.memory_gib)
+                                             args.context or existing.get('context_tokens'), args.memory_gib,
+                                             force=args.force or existing.get('force_memory', False))
         else:
             source = resolve_source(args.source, args.revision, args.file, format=args.format)
             if action != 'inspect':
-                name, profile = make_profile(source, config.get('runtime_images', {}), args.runtime, args.context, args.memory_gib)
+                name, profile = make_profile(source, config.get('runtime_images', {}), args.runtime, args.context, args.memory_gib,
+                                             force=args.force)
         if action == 'inspect':
             print(json.dumps(source or existing, indent=2))
             return
@@ -628,16 +633,18 @@ def manage_models(args):
             profile = config['profiles'][name]
             requested_runtime = args.runtime
             requested_context = args.context
-            if requested_context is not None or requested_runtime != 'auto' or args.memory_gib is not None:
+            if requested_context is not None or requested_runtime != 'auto' or args.memory_gib is not None or args.force:
                 if not profile.get('source'):
                     raise ValueError('Re-fetch a Hugging Face source to change legacy model settings')
                 engine = profile['engine'] if requested_runtime == 'auto' else requested_runtime
                 name, profile = make_profile(profile['source'], config['runtime_images'], engine,
-                                             requested_context or profile.get('context_tokens'), args.memory_gib)
+                                             requested_context or profile.get('context_tokens'), args.memory_gib,
+                                             force=args.force or profile.get('force_memory', False))
                 with model_lock():
                     save_profile(name, profile)
                     prepare_models([name])
                     model_manager(effective_config()).control('reload')
+            warn_forced_memory(profile)
             print(json.dumps(manager.control('select' if action == 'use' else 'select-pin', name), indent=2))
             print('WebUI and other clients can keep using local/general.')
         elif action == 'remove':
@@ -703,6 +710,8 @@ def main():
             command.add_argument('--runtime', choices=('auto','ramalama','llamacpp','strata','vllm'), default='auto')
             command.add_argument('--context', type=parse_context)
             command.add_argument('--memory-gib', type=int, help='Explicit resident memory budget when metadata is insufficient')
+            command.add_argument('--force', action='store_true',
+                                 help='Persistently override estimated-memory limits for this profile; weight memory and OS reserve checks remain')
         if action == 'remove':
             command.add_argument('--purge-cache', action='store_true')
     args = parser.parse_args()

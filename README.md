@@ -64,6 +64,21 @@ An explicit context cannot exceed that declaration; missing metadata requires
 unknown memory geometry requires `--memory-gib`. These are estimates, not
 measured GPU peaks. One model runtime and one generation are admitted at a time.
 
+Add `--force` to `models plan`, `fetch`, `use` or `pin` to override the 110 GiB
+estimate cap and projected-memory admission for that profile. The estimate is
+still reported. Forced profiles are marked in `models list`, retain the override
+across reboot and share existing weights/caches. Before activation, the weight
+files plus 2 GiB minimum overhead and the configured OS reserve must still fit
+`MemAvailable`; the reserve is checked again before generation. Source/context,
+checksum and disk-space checks remain in effect. Runtime allocation may still
+fail or exhaust memory when the projection is overridden. Unknown KV geometry
+still requires `--memory-gib`.
+
+```bash
+bluefin-ai-platform models plan OWNER/REPOSITORY --file PATH/WEIGHTS.gguf --runtime strata --context 64k --force
+bluefin-ai-platform models fetch OWNER/REPOSITORY --file PATH/WEIGHTS.gguf --runtime strata --context 64k --force
+```
+
 ```bash
 bluefin-ai-platform models fetch INSTALLED_ID --context 128k
 bluefin-ai-platform models fetch INSTALLED_ID --runtime strata --context 64k
@@ -162,7 +177,8 @@ installation. Legacy dashboard/independent serving recipes must not run alongsid
 the controller. In older chats using `local/general`, choose a named installed
 model once. Existing chat data is retained.
 
-Validation: 174 regression tests and CI static/security checks passed. A pinned
+Validation: 183 regression tests and CI static/security checks passed, including
+forced-profile persistence, activation and retained memory/artifact guards. A pinned
 WebUI/Bifrost/nginx stack completed three overlapping chat requests with one
 active generation and no concurrency rejection, using fixture inference and
 lifecycle hooks. Tests also cover FIFO limits, timeouts, cancellation and model

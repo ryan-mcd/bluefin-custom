@@ -40,6 +40,13 @@ def selected_profile(config, base, *, saved_only=False):
         return fallback
 
 
+def warn_forced_memory(profile):
+    if profile.get('force_memory', False):
+        print('Warning: --force overrides estimated-memory admission for this profile. '
+              'Weights plus 2 GiB overhead and the OS reserve must still fit available memory; '
+              'runtime allocation can fail or exhaust memory.')
+
+
 class ModelManager:
     def __init__(self, config, base, models, run, write, port=18100):
         self.config, self.base, self.models = config, base, models
@@ -125,6 +132,8 @@ class ModelManager:
             policy = 'boot' if name in self.config.get('prepare_on_boot', list(self.config['profiles'])) else 'installed' if name in installed else 'on demand'
             if name == selected:
                 policy += ', selected'
+            if profile.get('force_memory', False):
+                policy += ', forced memory'
             if profile.get('source'):
                 source = profile['source']
                 print('  ' + source['repo'] + '@' + source['revision'][:12] + ' / ' + str(source.get('file') or source['format']))
@@ -136,6 +145,7 @@ class ModelManager:
         for name in profiles:
             profile = self.config['profiles'][name]
             print(f'{name}: {profile["engine"]}, {profile.get("context_tokens", "?")} tokens, {profile["resident_gib"]} GiB admission budget')
+            warn_forced_memory(profile)
         for artifact in unique.values():
             print(f'  {artifact["name"]}: {artifact["bytes"] / 10**9:.2f} GB')
         print(f'Unverified/missing weights: {needed / 10**9:.2f} GB. Runtime images and prepared caches need additional space.')

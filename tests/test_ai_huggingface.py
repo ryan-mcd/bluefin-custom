@@ -240,7 +240,7 @@ class FetchCommandTests(unittest.TestCase):
             home=Path(directory);base=home/'config';base.mkdir()
             config=release();(base/'controller.json').write_text(json.dumps(config))
             args=SimpleNamespace(model_action='fetch',source='arbitrary/publisher',revision=None,file='weights.gguf',
-                                 format='auto',runtime='ramalama',context=32768,memory_gib=None)
+                                 format='auto',runtime='ramalama',context=32768,memory_gib=None,force=False)
             source=source_fixture();source['repo']='arbitrary/publisher'
             name,profile=hf.make_profile(source,config['runtime_images'],runtime='ramalama',context=32768)
             with patch.object(platform,'BASE',base),patch.object(Path,'home',return_value=home),patch.object(platform,'run'):
@@ -255,7 +255,7 @@ class FetchCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base=Path(directory);config=release();(base/'controller.json').write_text(json.dumps(config))
             args=SimpleNamespace(model_action='plan',source='owner/model',revision=None,file='weights.gguf',
-                                 format='auto',runtime='auto',context=None,memory_gib=None)
+                                 format='auto',runtime='auto',context=None,memory_gib=None,force=False)
             with patch.object(platform,'BASE',base),patch.object(platform,'run'),patch.object(platform,'resolve_source',return_value=source_fixture()):
                 platform.manage_models(args)
             self.assertEqual(hf.registry_profiles(base),{})
@@ -289,7 +289,7 @@ class SourceChoiceRegressions(unittest.TestCase):
             name,profile=hf.make_profile(source_fixture(),config['runtime_images'])
             (base/'model-registry.json').write_text(json.dumps(dict(version=1,profiles={name:profile})))
             args=SimpleNamespace(model_action='fetch',source=name,revision=None,file=None,format='auto',
-                                 runtime='auto',context=None,memory_gib=None)
+                                 runtime='auto',context=None,memory_gib=None,force=False)
             with patch.object(platform,'BASE',base),patch.object(platform,'run'),patch.object(platform,'save_profile'):
                 with patch.object(platform,'prepare_models') as prepare,patch.object(ModelManager,'control'):
                     with patch.object(platform,'resolve_source') as resolve:platform.manage_models(args)

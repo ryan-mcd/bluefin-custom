@@ -331,7 +331,7 @@ def resolve_source(source, revision=None, filename=None, hub=None, format="auto"
                 directory=namespace, artifacts=artifacts)
 
 
-def make_profile(source, images, runtime='auto', context=None, memory_gib=None):
+def make_profile(source, images, runtime='auto', context=None, memory_gib=None, force=False):
     engine = ('ramalama' if source['format'] == 'gguf' else 'vllm') if runtime == 'auto' else runtime
     if engine not in ('ramalama', 'llamacpp', 'strata', 'vllm'):
         raise ValueError('Unsupported runtime')
@@ -373,13 +373,20 @@ def make_profile(source, images, runtime='auto', context=None, memory_gib=None):
     budget = memory_gib if memory_gib is not None else estimate
     if budget is None:
         raise ValueError('Cannot estimate KV memory from source metadata; supply --memory-gib explicitly')
-    if type(budget) is not int or not 1 <= budget <= 110:
-        raise ValueError('Estimated memory exceeds the 110 GiB runtime limit; reduce --context or choose smaller weights')
+    if type(force) is not bool:
+        raise ValueError('force must be a boolean')
+    if type(budget) is not int or budget < 1:
+        raise ValueError('Memory budget must be a positive integer in GiB')
+    if budget > 110 and not force:
+        raise ValueError(f'Estimated memory is {budget} GiB, exceeding the 110 GiB runtime limit; '
+                         'reduce --context, choose smaller weights, or use --force to override estimated-memory checks')
     if budget * GIB < weights + 2 * GIB:
         raise ValueError('Memory budget cannot hold the selected weights and runtime overhead')
     identity = dict(repo=source['repo'], revision=source['revision'], file=source['file'], runtime=engine, context=tokens, memory_gib=budget)
+    if force:
+        identity['force_memory'] = True
     name = 'hf-' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
-    cache = 'bluefin-model-' + hashlib.sha256(json.dumps({k:v for k,v in identity.items() if k not in ('context', 'memory_gib')}, sort_keys=True).encode()).hexdigest()[:24]
+    cache = 'bluefin-model-' + hashlib.sha256(json.dumps({k:v for k,v in identity.items() if k not in ('context', 'memory_gib', 'force_memory')}, sort_keys=True).encode()).hexdigest()[:24]
     image = images.get(engine)
     if not image:
         raise ValueError('Runtime image is not configured: ' + engine)
@@ -387,6 +394,8 @@ def make_profile(source, images, runtime='auto', context=None, memory_gib=None):
                    requires_key=True, backend_model=name, resident_gib=budget, context_tokens=tokens,
                    port=18110, cache_volume=cache, artifacts=source['artifacts'], source=source,
                    model_directory=source['directory'], command=[])
+    if force:
+        profile['force_memory'] = True
     if engine in ('ramalama', 'llamacpp'):
         profile['command'] = (['llama-server'] if engine == 'ramalama' else []) + [
             '--host','0.0.0.0','--port','8080','--model','/models/' + source['directory'] + '/' + source['file'],  # nosec B104: container listener, loopback-only host publication

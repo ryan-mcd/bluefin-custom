@@ -198,8 +198,13 @@ class Controller:
     def start(self, name):
         p = self.profiles[name]
         self.preflight(p)
-        if self.memory() < (p['resident_gib'] + self.config['reserve_gib']) * GIB:
-            raise Rejected(507, 'Insufficient host memory for weights, KV cache and runtime overhead')
+        required = p['resident_gib'] * GIB
+        if p.get('force_memory', False):
+            # --force overrides the projection, not measured weight/reserve admission.
+            required = sum(a['bytes'] for a in p['artifacts']) + 2 * GIB
+        if self.memory() < required + self.config['reserve_gib'] * GIB:
+            detail = 'weights, runtime overhead and OS reserve' if p.get('force_memory', False) else 'weights, KV cache and runtime overhead'
+            raise Rejected(507, 'Insufficient host memory for ' + detail)
         self.manage('reset-failed', 'bluefin-runtime-' + name + '.service')
         self.manage('start', 'bluefin-runtime-' + name + '.service')
         deadline = time.monotonic() + self.config['startup_seconds']
