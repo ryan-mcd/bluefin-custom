@@ -75,6 +75,16 @@ another named WebUI choice, without selecting a platform default. Each chat
 retains its selected model. The controller admits one generation at a time and
 drains an active request before loading another runtime.
 
+Overlapping inference requests wait in FIFO order instead of failing immediately
+with a concurrency error. By default, up to eight requests can wait for up to
+180 seconds; a full queue or expired wait returns `429`. Cold starts and runtime
+switches also hold waiting requests. `max_pending` (0–16; zero disables waiting)
+and `queue_seconds` (1–300) configure this policy in the platform manifest. This
+does not increase runtime slots or divide the model's context between requests.
+`models status` reports `inflight`, `queued` and `queue_limit`. A disconnected
+caller is removed from the queue, or its upstream connection is closed and its
+generation lease released; generation is never replayed automatically.
+
 `models use ID` is optional: it loads a model and saves the target of the API
 alias `local/general`. WebUI uses explicit installed-model IDs instead of this
 global alias. `models pin ID` deliberately rejects requests for other models;
@@ -152,7 +162,12 @@ installation. Legacy dashboard/independent serving recipes must not run alongsid
 the controller. In older chats using `local/general`, choose a named installed
 model once. Existing chat data is retained.
 
-Validation: 161 regression tests and CI static/security checks passed. The new
+Validation: 174 regression tests and CI static/security checks passed. A pinned
+WebUI/Bifrost/nginx stack completed three overlapping chat requests with one
+active generation and no concurrency rejection, using fixture inference and
+lifecycle hooks. Tests also cover FIFO limits, timeouts, cancellation and model
+discovery during cold starts. The earlier official-client replacement passed
+161 tests. The new
 image-owned CLI/library installation passed on Fedora 43 with Python 3.14;
 unprivileged `claudex` source inspection, a real small-file download, hardlinked
 serving view, readiness verification and revision cleanup passed. Local HTTP

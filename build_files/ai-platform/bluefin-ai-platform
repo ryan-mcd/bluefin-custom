@@ -229,6 +229,9 @@ def validate(config):
                             ('idle_seconds', 30, 86400)):
         if type(config[name]) is not int or not low <= config[name] <= high:
             raise ValueError('Invalid ' + name)
+    for name, low, high, default in (('max_pending', 0, 16, 8), ('queue_seconds', 1, 300, 180)):
+        if type(config.get(name, default)) is not int or not low <= config.get(name, default) <= high:
+            raise ValueError('Invalid ' + name)
     if len(config['profiles']) > 4096 or not config['aliases']:
         raise ValueError('Provide at most 4096 installed runtime profiles and at least one alias')
     for image in config.get('runtime_images', {}).values():

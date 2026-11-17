@@ -155,6 +155,55 @@ class HTTPTest(unittest.TestCase):
         self.controller.catalog_ready=lambda p:False
         self.assertEqual(self.request('GET','/catalog/models')[1]['data'],[])
 
+    def test_model_discovery_remains_available_during_a_cold_start(self):
+        entered=threading.Event();release=threading.Event();errors=[]
+        def manage(*args):
+            self.events.append(args)
+            if args[0]=='start':
+                entered.set();release.wait(3)
+        self.controller.manage=manage
+        self.controller.catalog_ready=lambda profile:True
+        def infer():
+            try:
+                with self.controller.lease('general'):pass
+            except Exception as exc:errors.append(exc)
+        worker=threading.Thread(target=infer);worker.start()
+        self.assertTrue(entered.wait(2))
+        try:
+            status,body=self.request('GET','/catalog/models')
+            self.assertEqual(status,200)
+            self.assertEqual({m['id'] for m in body['data']},{'local/small','local/large'})
+            status,body=self.request('GET','/control/status',key='admin-secret')
+            self.assertEqual(status,200);self.assertEqual(body['state'],'starting')
+            self.assertTrue(body['switching'])
+            # Generation admission remains closed while the engine is loading.
+            status,_=self.request('POST','/v1/chat/completions',json.dumps({'model':'general','messages':[]}))
+            self.assertEqual(status,503)
+        finally:
+            release.set();worker.join(3)
+        self.assertFalse(worker.is_alive());self.assertFalse(errors)
+        self.assertEqual(self.controller.current,'small')
+
+    def test_catalog_snapshot_survives_a_concurrent_registry_reload(self):
+        entered=threading.Event();release=threading.Event();result=[];errors=[]
+        def prepared(profile):
+            if profile['backend_model']=='small':entered.set();release.wait(3)
+            return True
+        self.controller.catalog_ready=prepared
+        def discover():
+            try:result.extend(self.controller.catalog())
+            except Exception as exc:errors.append(exc)
+        worker=threading.Thread(target=discover);worker.start()
+        self.assertTrue(entered.wait(2))
+        try:
+            config=dict(self.controller.config,profiles={'small':self.controller.profiles['small']},aliases={'general':'small'})
+            self.controller.refresh=lambda:config
+            self.controller.control('reload')
+        finally:release.set();worker.join(3)
+        self.assertFalse(worker.is_alive());self.assertFalse(errors)
+        self.assertEqual({m['id'] for m in result},{'local/small','local/large'})
+        self.assertEqual({m['id'] for m in self.controller.catalog()},{'local/small'})
+
     def test_catalog_does_not_expose_admin_control_or_accept_missing_credentials(self):
         status,_=self.request('GET','/catalog/models',key='wrong')
         self.assertEqual(status,401)

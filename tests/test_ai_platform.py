@@ -31,6 +31,7 @@ memory = load('bluefin-ai-memory')
 def configuration():
     config = json.loads((ASSETS / 'platform.json').read_text())
     config['enabled'] = True
+    config['max_pending'] = 0
     config.pop('prepare_on_boot', None)
     config.pop('webui_aliases', None)
     image = 'registry.example.test/test@sha256:' + 'a' * 64

@@ -20,5 +20,7 @@
     "llamacpp": "image:llamacpp",
     "strata": "image:strata",
     "vllm": "image:vllm"
-  }
+  },
+  "max_pending": 8,
+  "queue_seconds": 180
 }

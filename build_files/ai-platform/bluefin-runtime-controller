@@ -1,12 +1,15 @@
 #!/usr/lib/bluefin-ai/huggingface/bin/python3
 """Single-resident runtime controller and streaming admission proxy (loopback only)."""
 import contextlib
+from collections import deque
 import fcntl
 import hmac
 import hashlib
 import http.client
 import json
 import os
+import select
+import socket
 import subprocess
 import threading
 import time
@@ -111,6 +114,9 @@ class Controller:
         self.selection_path, self.retire, self.refresh = selection_path, retire, refresh
         self.default = selected_profile(config, selection_path.parent) if selection_path else config['aliases']['general']
         self.condition = threading.Condition()
+        self.admission = threading.Condition()
+        self.pending = deque()
+        self.reserved = 0
         self.current = self.pin = None
         self.inflight = 0
         self.switching = False
@@ -119,11 +125,63 @@ class Controller:
         self.cooldown = {}
         self.fault = False
 
+    @staticmethod
+    def check_cancelled(cancelled):
+        if cancelled is not None and cancelled():
+            raise Rejected(499, 'Request cancelled before generation')
+
     @contextlib.contextmanager
-    def gate(self):
-        if not self.condition.acquire(blocking=False):
+    def capacity(self, cancelled=None):
+        """FIFO waiters reserve generation capacity before touching lifecycle state."""
+        ticket = object()
+        deadline = time.monotonic() + self.config.get('queue_seconds', 180)
+        with self.admission:
+            self.check_cancelled(cancelled)
+            available = not self.pending and self.reserved < self.config['max_inflight']
+            if not available and len(self.pending) >= self.config.get('max_pending', 8):
+                if self.switching:
+                    raise Rejected(503, 'Runtime is draining or activating and its waiting queue is full')
+                raise Rejected(429, 'Runtime waiting queue is full; retry after current requests finish')
+            self.pending.append(ticket)
+            try:
+                while self.pending[0] is not ticket or self.reserved >= self.config['max_inflight']:
+                    self.check_cancelled(cancelled)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise Rejected(429, 'Timed out waiting for runtime capacity')
+                    self.admission.wait(min(.25, remaining))
+                self.check_cancelled(cancelled)
+                self.pending.popleft()
+                self.reserved += 1
+            finally:
+                if ticket in self.pending:
+                    self.pending.remove(ticket)
+                    self.admission.notify_all()
+        try:
+            yield
+        finally:
+            with self.admission:
+                self.reserved -= 1
+                self.admission.notify_all()
+
+    @contextlib.contextmanager
+    def gate(self, wait=False, cancelled=None):
+        deadline = time.monotonic() + self.config['startup_seconds'] + self.config['drain_seconds']
+        if wait:
+            while not self.condition.acquire(timeout=.25):
+                self.check_cancelled(cancelled)
+                if time.monotonic() >= deadline:
+                    raise Rejected(503, 'Timed out waiting for a runtime lifecycle operation')
+        elif not self.condition.acquire(blocking=False):
             raise Rejected(503, 'Runtime operation in progress')
         try:
+            while wait and self.switching:
+                self.check_cancelled(cancelled)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Rejected(503, 'Timed out waiting for a runtime lifecycle operation')
+                self.condition.wait(min(.25, remaining))
+            self.check_cancelled(cancelled)
             if self.fault:
                 raise Rejected(503, 'Runtime cleanup failed; restart controller to reconcile')
             yield
@@ -158,7 +216,7 @@ class Controller:
             self.stop(name)
 
     def activate(self, target):
-        """Called with the condition held; all new requests fail fast during drain."""
+        """Called with the condition held; admitted requests wait through the switch."""
         if target == self.current and target is not None and self.health(self.profiles[target]):
             return
         if self.switching:
@@ -204,28 +262,29 @@ class Controller:
             self.condition.notify_all()
 
     @contextlib.contextmanager
-    def lease(self, alias):
-        with self.gate():
-            if self.switching:
-                raise Rejected(503, 'Runtime is draining or activating; retry later')
-            target = self.default if alias == 'general' else self.config['aliases'].get(alias, alias if alias in self.profiles else None)
-            if target is None:
-                raise Rejected(404, 'No model selected; fetch a Hugging Face source and run bluefin-ai-platform models use ID')
-            if self.pin is not None and target != self.pin:
-                raise Rejected(409, 'A different runtime is manually pinned')
-            if self.inflight >= self.config['max_inflight']:
-                raise Rejected(429, 'Runtime concurrency limit reached')
-            self.activate(target)
-            if self.memory() < self.config['reserve_gib'] * GIB:
-                raise Rejected(507, 'Host memory reserve reached')
-            self.inflight += 1
-        try:
-            yield self.profiles[target]
-        finally:
-            with self.condition:
-                self.inflight -= 1
-                self.last_used = time.monotonic()
-                self.condition.notify_all()
+    def lease(self, alias, cancelled=None):
+        with self.capacity(cancelled):
+            with self.gate(wait=self.config.get('max_pending', 8) > 0, cancelled=cancelled):
+                if self.switching:
+                    raise Rejected(503, 'Runtime is draining or activating; retry later')
+                target = self.default if alias == 'general' else self.config['aliases'].get(alias, alias if alias in self.profiles else None)
+                if target is None:
+                    raise Rejected(404, 'No model selected; fetch a Hugging Face source and select an installed model')
+                if self.pin is not None and target != self.pin:
+                    raise Rejected(409, 'A different runtime is manually pinned')
+                self.activate(target)
+                self.check_cancelled(cancelled)
+                if self.memory() < self.config['reserve_gib'] * GIB:
+                    raise Rejected(507, 'Host memory reserve reached')
+                self.inflight += 1
+                profile = self.profiles[target]
+            try:
+                yield profile
+            finally:
+                with self.condition:
+                    self.inflight -= 1
+                    self.last_used = time.monotonic()
+                    self.condition.notify_all()
 
     def choose_default(self, profile, pin=False):
         previous = self.current
@@ -304,9 +363,10 @@ class Controller:
                 raise Rejected(400, 'Use select, select-pin, pin, remove, auto or unload with a catalog profile')
 
     def catalog(self):
-        # Snapshot the registry without holding admission during Podman checks.
-        with self.gate():
-            profiles = dict(self.profiles)
+        # Registry reload replaces the profiles dictionary; it never mutates
+        # its keys in place. Keep that snapshot without acquiring the lifecycle
+        # gate: WebUI refreshes discovery while a cold start holds that gate.
+        profiles = dict(self.profiles)
         result, readiness = [], {}
         for name, profile in profiles.items():
             identity = (profile['image'], tuple((a['name'], a['sha256']) for a in profile['artifacts']))
@@ -329,13 +389,15 @@ class Controller:
     def status(self):
         # try-lock keeps status responsive during a long model startup.
         if not self.condition.acquire(blocking=False):
-            return {'state': self.state, 'switching': True}
+            return {'state': self.state, 'switching': True, 'inflight': self.inflight,
+                    'queued': len(self.pending), 'queue_limit': self.config.get('max_pending', 8)}
         try:
             return dict(state=self.state, current=self.current, selected=self.default,
                         context_tokens=self.profiles[self.default].get('context_tokens') if self.default else None,
                         runtime=self.profiles[self.current]['engine'] if self.current else None,
                         source=self.profiles[self.default].get('source', {}).get('repo') if self.default else None,
-                        pinned=self.pin, inflight=self.inflight)
+                        pinned=self.pin, inflight=self.inflight, queued=len(self.pending),
+                        queue_limit=self.config.get('max_pending', 8))
         finally:
             self.condition.release()
 
@@ -345,7 +407,7 @@ class Controller:
             if not self.condition.acquire(blocking=False):
                 continue
             try:
-                if (not self.fault and self.current and not self.pin and not self.inflight and not self.switching and
+                if (not self.fault and self.current and not self.pin and not self.inflight and not self.pending and not self.reserved and not self.switching and
                         time.monotonic() - self.last_used > self.config['idle_seconds']):
                     self.activate(None)
             except (OSError, subprocess.SubprocessError, Rejected):
@@ -391,6 +453,35 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json(401, {'error': {'message': 'Unauthorized or unsupported route'}})
 
+    def client_disconnected(self):
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b''
+        except BlockingIOError:
+            return False
+        except (OSError, ValueError):
+            return True
+
+    @contextlib.contextmanager
+    def cancel_upstream_on_disconnect(self, connection):
+        done = threading.Event()
+        upstream = connection.sock
+        def monitor():
+            while not done.wait(.1):
+                if self.client_disconnected():
+                    try:
+                        upstream.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    return
+        watcher = threading.Thread(target=monitor, daemon=True)
+        watcher.start()
+        try:
+            yield
+        finally:
+            done.set()
+            watcher.join(timeout=1)
+
     def do_POST(self):
         controller = self.server.controller
         admin = self.path == '/control/mode'
@@ -419,33 +510,40 @@ class Handler(BaseHTTPRequestHandler):
             alias = body.get('model')
             if not isinstance(alias, str):
                 raise Rejected(400, 'String model alias required')
-            with controller.lease(alias) as profile:
+            with controller.lease(alias, cancelled=self.client_disconnected) as profile:
                 body['model'] = profile.get('serving_model', profile['backend_model'])
                 connection = http.client.HTTPConnection('127.0.0.1', profile['port'], timeout=300)
+                response = None
                 try:
                     headers = {'Content-Type': 'application/json'}
                     if profile.get('backend_key'):
                         headers['Authorization'] = 'Bearer ' + profile['backend_key']
                     connection.request('POST', self.path, json.dumps(body).encode(), headers)
-                    response = connection.getresponse()
-                    self.send_response(response.status)
-                    self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
-                    self.send_header('X-Accel-Buffering', 'no')
-                    self.end_headers()
-                    started = True
-                    # read1 forwards available SSE bytes immediately; read(n) may wait for n bytes.
-                    while True:
-                        chunk = response.read1(65536)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        self.wfile.flush()
+                    with self.cancel_upstream_on_disconnect(connection):
+                        response = connection.getresponse()
+                        self.send_response(response.status)
+                        self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
+                        self.send_header('X-Accel-Buffering', 'no')
+                        self.end_headers()
+                        started = True
+                        # read1 forwards available SSE bytes immediately; read(n) may wait for n bytes.
+                        while True:
+                            chunk = response.read1(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
                 finally:
+                    if response is not None:
+                        response.close()
                     connection.close()
         except (Rejected, ValueError, OSError, http.client.HTTPException, subprocess.SubprocessError) as exc:
-            if not started:
+            if not started and not self.client_disconnected():
                 code = exc.code if isinstance(exc, Rejected) else 502
-                self.send_json(code, {'error': {'message': str(exc), 'type': 'runtime_error'}})
+                try:
+                    self.send_json(code, {'error': {'message': str(exc), 'type': 'runtime_error'}})
+                except OSError:
+                    pass
             # Once headers/tokens are sent, close the stream; never replay generation.
 
 
