@@ -58,6 +58,8 @@ class BootProvisionTests(unittest.TestCase):
         self.assertEqual(env['OPENAI_API_KEYS'], (self.base / 'client-key').read_text().strip())
         quadlet = (self.home / '.config/containers/systemd/bluefin-platform-webui.container').read_text()
         self.assertIn('OPENAI_API_BASE_URLS=http://127.0.0.1:8643/v1', quadlet)
+        for task in ('TITLE', 'TAGS', 'FOLLOW_UP'):
+            self.assertIn('ENABLE_' + task + '_GENERATION=false', quadlet)
 
     def test_fresh_units_are_started_without_resetting_unloaded_units(self):
         def manager(*args, **_kwargs):

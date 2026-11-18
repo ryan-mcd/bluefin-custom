@@ -70,6 +70,18 @@ class HTTPTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.controller.pin, 'large')
 
+    def test_cooldown_response_preserves_the_first_activation_failure(self):
+        self.controller.memory = lambda: 20*runtime.GIB
+        payload = json.dumps({'model': 'general', 'messages': []})
+        status, original = self.request('POST', '/v1/chat/completions', payload)
+        self.assertEqual(status, 507)
+        status, retry = self.request('POST', '/v1/chat/completions', payload)
+        self.assertEqual(status, 503)
+        self.assertIn(original['error']['message'], retry['error']['message'])
+        status, result = self.request('GET', '/control/status', key='admin-secret')
+        self.assertEqual(status, 200)
+        self.assertEqual(result['activation_failures']['small']['code'], 507)
+
     def test_sse_forwards_before_completion_and_holds_lease(self):
         connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=2)
         connection.request('POST', '/v1/chat/completions',

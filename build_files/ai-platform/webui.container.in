@@ -16,6 +16,7 @@ Environment=OPENAI_API_BASE_URLS=http://127.0.0.1:8643/v1
 Environment=ENABLE_PERSISTENT_CONFIG=false ENABLE_SIGNUP=false
 Environment=DEFAULT_MODELS=
 Environment=ENABLE_BASE_MODELS_CACHE=false MODELS_CACHE_TTL=1
+Environment=ENABLE_TITLE_GENERATION=false ENABLE_TAGS_GENERATION=false ENABLE_FOLLOW_UP_GENERATION=false
 EnvironmentFile=%h/.config/bluefin-ai/platform/webui.env
 Volume=bluefin-platform-webui:/app/backend/data
 DropCapability=all

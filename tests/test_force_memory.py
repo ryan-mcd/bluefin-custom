@@ -47,13 +47,15 @@ class ForceMemoryTests(unittest.TestCase):
         self.assertEqual(profile['cache_volume'], ordinary['cache_volume'])
         self.assertEqual(profile['artifacts'], ordinary['artifacts'])
 
-    def test_force_does_not_bypass_context_or_weight_floor_or_invent_missing_geometry(self):
+    def test_force_overrides_weight_projection_but_not_context_or_invalid_geometry(self):
         source = large_source(); images = release()['runtime_images']
         for kwargs, message in [({'context': 262144}, 'exceeds source'),
-                                ({'memory_gib': 81}, 'cannot hold'),
                                 ({'memory_gib': 0}, 'positive integer')]:
             with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, message):
                 hf.make_profile(source, images, force=True, **kwargs)
+        with self.assertRaisesRegex(ValueError, 'cannot hold'):
+            hf.make_profile(source, images, memory_gib=40)
+        self.assertEqual(hf.make_profile(source, images, force=True, memory_gib=40)[1]['resident_gib'], 40)
         source['metadata'] = {}
         with self.assertRaisesRegex(ValueError, 'supply --memory-gib'):
             hf.make_profile(source, images, force=True)
@@ -127,16 +129,16 @@ class ForceMemoryTests(unittest.TestCase):
         return runtime.Controller(config, manage=lambda *a: events.append(a), health=lambda p: True,
                                   memory=lambda: memory*hf.GIB, preflight=lambda p: None), events
 
-    def test_activation_overrides_projection_but_retains_weight_and_reserve_floor(self):
+    def test_activation_allows_streamed_weights_but_retains_startup_headroom_and_reserve(self):
         normal, events = self.controller(force=False)
         with self.assertRaises(runtime.Rejected) as error:
             with normal.lease('general'): pass
         self.assertEqual(error.exception.code, 507)
         self.assertFalse(any(e[0] == 'start' for e in events))
-        forced, events = self.controller()
+        forced, events = self.controller(memory=40)  # 80 GiB files need not all be resident.
         with forced.lease('general'): self.assertEqual(forced.inflight, 1)
         self.assertTrue(any(e[0] == 'start' for e in events))
-        low, events = self.controller(memory=97)
+        low, events = self.controller(memory=17)
         with self.assertRaisesRegex(runtime.Rejected, 'OS reserve'):
             with low.lease('general'): pass
         self.assertFalse(any(e[0] == 'start' for e in events))

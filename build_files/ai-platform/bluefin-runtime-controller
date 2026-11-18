@@ -7,6 +7,7 @@ import hmac
 import hashlib
 import http.client
 import json
+import math
 import os
 import select
 import socket
@@ -55,6 +56,29 @@ def available():
         if line.startswith('MemAvailable:'):
             return int(line.split()[1]) * 1024
     raise RuntimeError('MemAvailable is unavailable')
+
+
+def runtime_failure(unit):
+    """Detect an exited engine without disclosing journal contents to API callers."""
+    try:
+        result = subprocess.run(['systemctl', '--user', 'show', unit, '--no-pager',
+                                 '--property=LoadState,ActiveState,Result,ExecMainStatus'],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    if fields.get('LoadState') == 'not-found':
+        return 'Runtime unit is missing: ' + unit
+    if result.returncode:
+        return None  # A query failure is not evidence that the engine exited.
+    if fields.get('ActiveState') in ('failed', 'inactive'):
+        outcome = fields.get('Result', 'unknown')
+        outcome = outcome if outcome.replace('-', '').isalnum() and len(outcome) <= 32 else 'unknown'
+        status = fields.get('ExecMainStatus', '?')
+        status = status if status.isdecimal() and len(status) <= 10 else '?'
+        return (f'Runtime exited before readiness (result={outcome}, status={status}); '
+                f'inspect journalctl --user -b -u {unit}')
+    return None
 
 
 def runtime_cached(profile):
@@ -107,10 +131,11 @@ def ready(profile):
 
 class Controller:
     def __init__(self, config, manage=systemctl, memory=available, health=ready, preflight=runtime_preflight,
-                 selection_path=None, retire=None, refresh=None, catalog_ready=runtime_cached):
+                 selection_path=None, retire=None, refresh=None, catalog_ready=runtime_cached, failure=runtime_failure):
         self.config, self.profiles = config, config['profiles']
         self.manage, self.memory, self.health = manage, memory, health
         self.preflight, self.catalog_ready = preflight, catalog_ready
+        self.failure = failure
         self.selection_path, self.retire, self.refresh = selection_path, retire, refresh
         self.default = selected_profile(config, selection_path.parent) if selection_path else config['aliases']['general']
         self.condition = threading.Condition()
@@ -123,6 +148,7 @@ class Controller:
         self.state = 'idle'
         self.last_used = time.monotonic()
         self.cooldown = {}
+        self.activation_errors = {}
         self.fault = False
 
     @staticmethod
@@ -200,17 +226,23 @@ class Controller:
         self.preflight(p)
         required = p['resident_gib'] * GIB
         if p.get('force_memory', False):
-            # --force overrides the projection, not measured weight/reserve admission.
-            required = sum(a['bytes'] for a in p['artifacts']) + 2 * GIB
+            # File bytes are not resident RAM: engines can mmap/stream experts.
+            # --force delegates placement to the engine and retains the OS reserve.
+            required = 2 * GIB
         if self.memory() < required + self.config['reserve_gib'] * GIB:
-            detail = 'weights, runtime overhead and OS reserve' if p.get('force_memory', False) else 'weights, KV cache and runtime overhead'
+            detail = 'minimum runtime overhead and OS reserve' if p.get('force_memory', False) else 'weights, KV cache and runtime overhead'
             raise Rejected(507, 'Insufficient host memory for ' + detail)
         self.manage('reset-failed', 'bluefin-runtime-' + name + '.service')
         self.manage('start', 'bluefin-runtime-' + name + '.service')
         deadline = time.monotonic() + self.config['startup_seconds']
         while time.monotonic() < deadline:
             if self.health(p):
+                self.cooldown.pop(name, None)
+                self.activation_errors.pop(name, None)
                 return
+            failure = self.failure('bluefin-runtime-' + name + '.service')
+            if failure:
+                raise Rejected(503, failure)
             time.sleep(1)
         raise Rejected(503, 'Runtime readiness timed out')
 
@@ -220,14 +252,24 @@ class Controller:
         for name in self.profiles:
             self.stop(name)
 
+    def remember_activation_failure(self, name, exc):
+        self.cooldown[name] = time.monotonic() + 60
+        message = (' '.join(str(exc).split())[:1024] if isinstance(exc, Rejected) else
+                   f'Runtime activation failed ({type(exc).__name__}); '
+                   f'inspect journalctl --user -b -u bluefin-runtime-{name}.service')
+        self.activation_errors[name] = dict(code=exc.code if isinstance(exc, Rejected) else 503, message=message)
+
     def activate(self, target):
         """Called with the condition held; admitted requests wait through the switch."""
         if target == self.current and target is not None and self.health(self.profiles[target]):
             return
         if self.switching:
             raise Rejected(503, 'Runtime switch already in progress')
-        if target is not None and self.cooldown.get(target, 0) > time.monotonic():
-            raise Rejected(503, 'Runtime is cooling down after a failed activation')
+        remaining = self.cooldown.get(target, 0) - time.monotonic() if target is not None else 0
+        if remaining > 0:
+            cause = self.activation_errors.get(target, {}).get('message', 'Original failure unavailable; inspect the runtime journal')
+            raise Rejected(503, f'Runtime is cooling down after a failed activation; retry in {math.ceil(remaining)}s. '
+                           'Previous failure: ' + cause)
         if target is not None:
             self.preflight(self.profiles[target])  # Missing downloads must not interrupt the current model.
         self.switching = True
@@ -248,14 +290,14 @@ class Controller:
                 self.state = 'starting'
                 try:
                     self.start(target)
-                except Exception:
-                    self.cooldown[target] = time.monotonic() + 60
+                except Exception as exc:
+                    self.remember_activation_failure(target, exc)
                     self.stop(target)  # If cleanup fails, do not restore another engine.
                     if old is not None and old != target:
                         try:
                             self.start(old)
-                        except Exception:
-                            self.cooldown[old] = time.monotonic() + 60
+                        except Exception as restore_exc:
+                            self.remember_activation_failure(old, restore_exc)
                             self.stop(old)
                             raise
                         self.current = old
@@ -321,6 +363,8 @@ class Controller:
         if self.current and runtime_definition(config['profiles'].get(self.current, {})) != runtime_definition(previous):
             raise Rejected(409, 'Cannot change an active model definition')
         self.config, self.profiles = config, config['profiles']
+        self.cooldown = {name: until for name, until in self.cooldown.items() if name in self.profiles}
+        self.activation_errors = {name: error for name, error in self.activation_errors.items() if name in self.profiles}
         if self.current and previous.get('serving_model'):
             self.profiles[self.current]['serving_model'] = previous['serving_model']
         if self.default not in self.profiles:
@@ -402,7 +446,9 @@ class Controller:
                         runtime=self.profiles[self.current]['engine'] if self.current else None,
                         source=self.profiles[self.default].get('source', {}).get('repo') if self.default else None,
                         pinned=self.pin, inflight=self.inflight, queued=len(self.pending),
-                        queue_limit=self.config.get('max_pending', 8))
+                        queue_limit=self.config.get('max_pending', 8),
+                        activation_failures={name: dict(error, retry_after_seconds=max(0, math.ceil(self.cooldown.get(name, 0) - time.monotonic())))
+                                             for name, error in self.activation_errors.items()})
         finally:
             self.condition.release()
 

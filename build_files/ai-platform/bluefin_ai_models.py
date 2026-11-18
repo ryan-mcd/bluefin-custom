@@ -43,8 +43,8 @@ def selected_profile(config, base, *, saved_only=False):
 def warn_forced_memory(profile):
     if profile.get('force_memory', False):
         print('Warning: --force overrides estimated-memory admission for this profile. '
-              'Weights plus 2 GiB overhead and the OS reserve must still fit available memory; '
-              'runtime allocation can fail or exhaust memory.')
+              'The engine decides weight/cache placement; 2 GiB startup headroom and the OS reserve remain required. '
+              'Runtime allocation can fail or exhaust memory.')
 
 
 class ModelManager:

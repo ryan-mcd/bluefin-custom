@@ -67,9 +67,11 @@ measured GPU peaks. One model runtime and one generation are admitted at a time.
 Add `--force` to `models plan`, `fetch`, `use` or `pin` to override the 110 GiB
 estimate cap and projected-memory admission for that profile. The estimate is
 still reported. Forced profiles are marked in `models list`, retain the override
-across reboot and share existing weights/caches. Before activation, the weight
-files plus 2 GiB minimum overhead and the configured OS reserve must still fit
-`MemAvailable`; the reserve is checked again before generation. Source/context,
+across reboot and share existing weights/caches. Forced activation requires the
+configured OS reserve plus 2 GiB startup headroom in `MemAvailable`, and the
+reserve is checked again before generation. The engine decides weight/cache
+placement: total GGUF file bytes are not a resident-RAM floor for engines such as
+Strata that can stream experts from disk. Source/context,
 checksum and disk-space checks remain in effect. Runtime allocation may still
 fail or exhaust memory when the projection is overridden. Unknown KV geometry
 still requires `--memory-gib`.
@@ -99,6 +101,19 @@ does not increase runtime slots or divide the model's context between requests.
 `models status` reports `inflight`, `queued` and `queue_limit`. A disconnected
 caller is removed from the queue, or its upstream connection is closed and its
 generation lease released; generation is never replayed automatically.
+
+WebUI's automatic title, tag and follow-up generations are disabled in the image
+defaults, so these extra model calls do not occupy the single generation slot
+between chat turns. Normal chat and model reasoning remain enabled. Loading a
+model on demand and reloading after the 15-minute idle unload still take time.
+If the runtime exits during preparation, the controller reports its service
+result and journal command promptly instead of polling for the full 15-minute
+startup deadline. Live preparation can still use that deadline.
+Cooldown responses retain the original controlled activation error and show the
+remaining retry delay. `models status` includes `activation_failures` by model
+ID, with the error code/message and retry delay. A successful activation clears
+that model's failure record; controller restart clears these process-local
+records. Journal contents and arbitrary exception text are not retained.
 
 `models use ID` is optional: it loads a model and saves the target of the API
 alias `local/general`. WebUI uses explicit installed-model IDs instead of this
@@ -177,12 +192,15 @@ installation. Legacy dashboard/independent serving recipes must not run alongsid
 the controller. In older chats using `local/general`, choose a named installed
 model once. Existing chat data is retained.
 
-Validation: 183 regression tests and CI static/security checks passed, including
-forced-profile persistence, activation and retained memory/artifact guards. A pinned
+Validation: 196 regression tests and CI static/security checks passed, including
+forced-profile persistence, streamed-weight admission, prompt runtime-exit errors,
+activation, retained cooldown causes, and reserve/artifact guards. A pinned
 WebUI/Bifrost/nginx stack completed three overlapping chat requests with one
 active generation and no concurrency rejection, using fixture inference and
 lifecycle hooks. Tests also cover FIFO limits, timeouts, cancellation and model
-discovery during cold starts. The earlier official-client replacement passed
+discovery during cold starts. A delayed reasoning-stream fixture reached WebUI
+before final content, and its disabled task endpoints made no auxiliary model
+calls. These timings measure proxy delivery, not GPU inference. The earlier official-client replacement passed
 161 tests. The new
 image-owned CLI/library installation passed on Fedora 43 with Python 3.14;
 unprivileged `claudex` source inspection, a real small-file download, hardlinked

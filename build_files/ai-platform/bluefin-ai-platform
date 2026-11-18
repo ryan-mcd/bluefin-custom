@@ -711,7 +711,7 @@ def main():
             command.add_argument('--context', type=parse_context)
             command.add_argument('--memory-gib', type=int, help='Explicit resident memory budget when metadata is insufficient')
             command.add_argument('--force', action='store_true',
-                                 help='Persistently override estimated-memory limits for this profile; weight memory and OS reserve checks remain')
+                                 help='Persistently override estimated-memory limits, including resident-weight estimates; measured OS reserve checks remain')
         if action == 'remove':
             command.add_argument('--purge-cache', action='store_true')
     args = parser.parse_args()

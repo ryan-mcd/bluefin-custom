@@ -380,7 +380,7 @@ def make_profile(source, images, runtime='auto', context=None, memory_gib=None, 
     if budget > 110 and not force:
         raise ValueError(f'Estimated memory is {budget} GiB, exceeding the 110 GiB runtime limit; '
                          'reduce --context, choose smaller weights, or use --force to override estimated-memory checks')
-    if budget * GIB < weights + 2 * GIB:
+    if not force and budget * GIB < weights + 2 * GIB:
         raise ValueError('Memory budget cannot hold the selected weights and runtime overhead')
     identity = dict(repo=source['repo'], revision=source['revision'], file=source['file'], runtime=engine, context=tokens, memory_gib=budget)
     if force:
