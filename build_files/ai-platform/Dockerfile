@@ -2,7 +2,7 @@
 # This file is a dependency catalog parsed by bluefin-ai-platform; it is not built.
 # Keep each alias stable: platform.json and runtime profiles use image:<alias>.
 # Rolling tags (server-vulkan/latest) are still immutable because their digest is pinned.
-FROM docker.io/maximhq/bifrost:v2.5.1@sha256:5ec9873acaf1687556b6e4dd854b92b539d9debf87a5a683b66338648b84d3c8 AS bifrost
+FROM docker.io/maximhq/bifrost:v2.6.0@sha256:5968d007ba4f74ee01bc4ceb071decb9927a0b7bb43dbb9072208f75e2d522e3 AS bifrost
 FROM ghcr.io/open-webui/open-webui:v0.13.4@sha256:d5168bfbc28609eff5bea1b438dd864cf64d185cf6582c02244865e18385b901 AS webui
 FROM docker.io/library/nginx:1.31.8-alpine@sha256:fed7e14be83cbd2661a75cdc5b872d936cf155d46c327084d30b8df19ae88d72 AS edge
 FROM ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:8af21639d085883fe5147a25a2ee29ce38302d950faa7e42355556d9f9a5af6c AS llamacpp
