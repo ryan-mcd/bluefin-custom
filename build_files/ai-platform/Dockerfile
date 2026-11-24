@@ -8,4 +8,4 @@ FROM docker.io/library/nginx:1.31.8-alpine@sha256:fed7e14be83cbd2661a75cdc5b872d
 FROM ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:8af21639d085883fe5147a25a2ee29ce38302d950faa7e42355556d9f9a5af6c AS llamacpp
 FROM quay.io/ramalama/ramalama:0.26@sha256:9a8362e0a9a95df67d8e85cd8197aa25ce7aa3530e9d954b85b76cda152dd8d1 AS ramalama
 FROM ghcr.io/niko1221/strata:0.2.16-rocm-gfx1151@sha256:d144c4f86b1081fa3f2e947d9e7c53654d130113aa458c15598a6e012dc34383 AS strata
-FROM docker.io/rocm/vllm:latest@sha256:e0ea9a10b729573ea8598bdc073bda0ea382fe1037eec7c0761b6fa7f46baaf4 AS vllm
+FROM docker.io/rocm/vllm:latest@sha256:380efeed0d5fa65fc044253adc1ce53a04907d1202b30fb36e175370ee39a003 AS vllm
